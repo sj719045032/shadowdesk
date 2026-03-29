@@ -141,7 +141,7 @@ export type FillData = {
 };
 
 export async function fetchMyFillIds(): Promise<number[]> {
-  const contract = await getContract();
+  const contract = await getContract(true); // needs signer for msg.sender
   const ids: bigint[] = await contract.getMyFills();
   return ids.map((id) => Number(id));
 }
