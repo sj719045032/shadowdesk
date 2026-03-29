@@ -144,7 +144,6 @@ export default function OrderDetail() {
 
           {/* Maker info */}
           <div className="flex items-center justify-between text-xs text-slate-500">
-            <span>Maker: <span className="font-mono text-slate-400">{order.maker.slice(0, 8)}...{order.maker.slice(-6)}</span></span>
             <span>{new Date(order.createdAt * 1000).toLocaleString()}</span>
           </div>
         </div>

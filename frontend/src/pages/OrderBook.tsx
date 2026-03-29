@@ -513,7 +513,6 @@ export default function OrderBook() {
                     <th className="text-left px-4 py-3 font-semibold">Side</th>
                     <th className="text-left px-4 py-3 font-semibold">Price</th>
                     <th className="text-left px-4 py-3 font-semibold">Amount</th>
-                    <th className="text-left px-4 py-3 font-semibold">Maker</th>
                     <th className="text-left px-4 py-3 font-semibold">Status</th>
                     <th className="text-left px-4 py-3 font-semibold">Time</th>
                     <th className="text-right px-4 py-3 font-semibold">Action</th>
@@ -561,9 +560,6 @@ export default function OrderBook() {
                           </svg>
                           Encrypted
                         </span>
-                      </td>
-                      <td className="px-4 py-3.5 font-mono text-xs text-slate-500">
-                        {o.maker.slice(0, 6)}...{o.maker.slice(-4)}
                       </td>
                       <td className="px-4 py-3.5">
                         <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full ${
@@ -642,9 +638,8 @@ export default function OrderBook() {
                     Amount Encrypted
                   </span>
                 </div>
-                <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span className="font-mono">{o.maker.slice(0, 6)}...{o.maker.slice(-4)}</span>
-                  <span>{new Date(o.createdAt * 1000).toLocaleDateString()}</span>
+                <div className="text-xs text-slate-500">
+                  {new Date(o.createdAt * 1000).toLocaleDateString()}
                 </div>
                 {o.status === 0 && account?.toLowerCase() !== o.maker.toLowerCase() && (
                   <button

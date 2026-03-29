@@ -329,6 +329,7 @@ contract ConfidentialOTC is ZamaEthereumConfig {
             // Filling a SELL order: taker sends USDC, receives ETH
             if (msg.value != 0) revert InvalidDepositType();
             if (takerUsdcAmount == 0) revert ZeroDeposit();
+            if (takerEthAmount == 0) revert ZeroDeposit();
             if (takerEthAmount > order.ethRemaining) revert InsufficientRemaining();
         } else {
             // Filling a BUY order: taker sends ETH, receives USDC
