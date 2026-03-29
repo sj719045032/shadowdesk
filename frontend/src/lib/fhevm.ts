@@ -16,9 +16,11 @@ export async function getFhevmInstance(): Promise<FhevmInstance> {
   return instance;
 }
 
-// Scale factor: all encrypted values are multiplied by this to avoid decimals
-// Price 200.5 → 2005000, Amount 0.01 → 100
-export const FHE_SCALE = 10000;
+// Scale factor: 8 decimal places (same precision as BTC/satoshi)
+// 0.001 → 100000, 3000 → 300000000000
+// euint64 max ~1.8×10^19, so max value after scaling ~184 billion (plenty for demo)
+export const FHE_DECIMALS = 8;
+export const FHE_SCALE = 10 ** FHE_DECIMALS;
 
 export function scaleForFHE(value: number): number {
   return Math.round(value * FHE_SCALE);
