@@ -66,7 +66,9 @@ export default function OrderDetail() {
       const a = unscaleFromFHE(Number(values[1] || 0n));
       setDecryptedPrice(p);
       setDecryptedAmount(a);
-      setFillAmount(String(a));
+      // Default fill to remaining, not original
+      const remaining = order!.isBuy ? Number(order!.tokenRemaining) / p : Number(order!.ethRemaining);
+      setFillAmount(String(remaining > 0 ? remaining : a));
     } catch {
       setDecryptError("Access denied. Ask the maker to grant you access first.");
     } finally {
@@ -153,7 +155,7 @@ export default function OrderDetail() {
       <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-6">
         <div className="p-6">
           <h3 className="text-sm font-semibold text-slate-300 mb-4">Encrypted Terms</h3>
-          <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="bg-[#0d1117] rounded-xl p-4 border border-[#1e293b]/50">
               <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Price</div>
               {decryptedPrice !== null ? (
@@ -163,9 +165,19 @@ export default function OrderDetail() {
               )}
             </div>
             <div className="bg-[#0d1117] rounded-xl p-4 border border-[#1e293b]/50">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Amount</div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Original Amount</div>
               {decryptedAmount !== null ? (
                 <div className="text-xl font-bold text-emerald-400 decrypt-reveal">{decryptedAmount} {order.tokenPair.split("/")[0]}</div>
+              ) : (
+                <div className="encrypted-badge inline-flex items-center gap-1.5 border border-blue-500/20 rounded px-2.5 py-1 text-xs text-blue-300/80">🔒 Encrypted</div>
+              )}
+            </div>
+            <div className="bg-[#0d1117] rounded-xl p-4 border border-[#1e293b]/50">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Remaining</div>
+              {decryptedAmount !== null ? (
+                <div className={`text-xl font-bold decrypt-reveal ${Number(fillAmount) < decryptedAmount ? "text-amber-400" : "text-emerald-400"}`}>
+                  {fillAmount} {order.tokenPair.split("/")[0]}
+                </div>
               ) : (
                 <div className="encrypted-badge inline-flex items-center gap-1.5 border border-blue-500/20 rounded px-2.5 py-1 text-xs text-blue-300/80">🔒 Encrypted</div>
               )}
