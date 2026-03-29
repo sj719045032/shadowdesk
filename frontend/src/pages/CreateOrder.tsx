@@ -185,14 +185,16 @@ export default function CreateOrder() {
         ))}
       </div>
 
-      {/* Submitting overlay */}
+      {/* Submitting modal overlay */}
       {submitting && (
-        <div className="rounded-2xl bg-[#111827] border border-blue-500/20 gradient-border mb-6 overflow-hidden">
-          <EncryptionAnimation />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="rounded-2xl bg-[#111827] border border-blue-500/20 gradient-border overflow-hidden w-full max-w-md mx-4">
+            <EncryptionAnimation />
+          </div>
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className={`space-y-6 ${submitting ? "opacity-30 pointer-events-none" : ""}`}>
+      <form onSubmit={handleSubmit} className="space-y-6">
         {/* Step 1: Token Pair */}
         <div className="bg-[#111827] border border-[#1e293b] rounded-xl p-5 sm:p-6 gradient-border">
           <div className="flex items-center gap-2 mb-4">
