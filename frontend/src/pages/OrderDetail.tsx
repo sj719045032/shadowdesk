@@ -87,9 +87,10 @@ export default function OrderDetail() {
         const tx = await contract.fillOrder(orderId, encrypted.handles[0], encrypted.inputProof, encrypted.handles[1], encrypted.inputProof, parseUnits(ethAmt, 18), 0, { value: parseUnits(ethAmt, 18) });
         await tx.wait();
       } else {
+        const ethToReceive = String(fillAmt);
         const usdcAmt = String(fillAmt * price);
         if (Number(usdcAmt) > 0) await approveUSDC(usdcAmt);
-        const tx = await contract.fillOrder(orderId, encrypted.handles[0], encrypted.inputProof, encrypted.handles[1], encrypted.inputProof, 0, parseUnits(usdcAmt, 6));
+        const tx = await contract.fillOrder(orderId, encrypted.handles[0], encrypted.inputProof, encrypted.handles[1], encrypted.inputProof, parseUnits(ethToReceive, 18), parseUnits(usdcAmt, 6));
         await tx.wait();
       }
       await loadOrder();

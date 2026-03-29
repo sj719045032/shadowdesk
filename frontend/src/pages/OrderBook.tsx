@@ -135,6 +135,7 @@ export default function OrderBook() {
         await tx.wait();
       } else {
         // Filling a SELL order: taker sends USDC, receives ETH
+        const ethToReceive = String(fillAmt);
         const usdcAmount = String(fillAmt * price);
         if (Number(usdcAmount) > 0) {
           await approveUSDC(usdcAmount);
@@ -145,8 +146,8 @@ export default function OrderBook() {
           encrypted.inputProof,
           encrypted.handles[1],
           encrypted.inputProof,
-          0,                              // takerEthAmount = 0
-          parseUnits(usdcAmount, 6),      // takerUsdcAmount
+          parseUnits(ethToReceive, 18),    // takerEthAmount = ETH taker receives
+          parseUnits(usdcAmount, 6),       // takerUsdcAmount = USDC taker pays
         );
         await tx.wait();
       }
