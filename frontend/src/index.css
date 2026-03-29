@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* ============================================
+   ShadowDesk - Premium Dark Pool Theme
+   ============================================ */
+
 body {
   margin: 0;
   background: #0a0e17;
@@ -11,4 +15,299 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+}
+
+/* ---- Shimmer effect for encrypted badges ---- */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.encrypted-badge {
+  background: linear-gradient(
+    90deg,
+    rgba(59, 130, 246, 0.1) 0%,
+    rgba(59, 130, 246, 0.3) 50%,
+    rgba(59, 130, 246, 0.1) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* ---- Pulse animation for Open status ---- */
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 8px 2px rgba(34, 197, 94, 0.2);
+  }
+}
+
+.status-open {
+  animation: pulse-glow 2.5s ease-in-out infinite;
+}
+
+/* ---- Page fade-in ---- */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.page-fade-in {
+  animation: fadeInUp 0.4s ease-out;
+}
+
+/* ---- Row stagger entrance ---- */
+@keyframes slideInRow {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.row-enter {
+  animation: slideInRow 0.3s ease-out both;
+}
+
+/* ---- Glow effects ---- */
+@keyframes subtle-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.08);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(59, 130, 246, 0.15);
+  }
+}
+
+.card-glow {
+  animation: subtle-glow 4s ease-in-out infinite;
+}
+
+/* ---- Nav active glow ---- */
+.nav-glow {
+  position: relative;
+}
+
+.nav-glow::after {
+  content: "";
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 60%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #3b82f6, transparent);
+  border-radius: 1px;
+}
+
+/* ---- Gradient borders ---- */
+.gradient-border {
+  position: relative;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+.gradient-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(59, 130, 246, 0.05), rgba(34, 197, 94, 0.15));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ---- Encryption animation ---- */
+@keyframes encryptPulse {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.encrypt-pulse {
+  animation: encryptPulse 1.5s ease-in-out infinite;
+}
+
+/* ---- Encryption character scramble effect ---- */
+@keyframes scrambleFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.scramble-char {
+  display: inline-block;
+  animation: scrambleFloat 0.8s ease-in-out infinite;
+  font-family: monospace;
+  color: #3b82f6;
+}
+
+/* ---- Decrypt reveal ---- */
+@keyframes decryptReveal {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+}
+
+.decrypt-reveal {
+  animation: decryptReveal 0.6s ease-out;
+}
+
+/* ---- Lock opening animation ---- */
+@keyframes lockOpen {
+  0% {
+    transform: rotate(0deg);
+  }
+  30% {
+    transform: rotate(-15deg);
+  }
+  60% {
+    transform: rotate(5deg);
+  }
+  100% {
+    transform: rotate(0deg) scale(1.1);
+  }
+}
+
+.lock-open {
+  animation: lockOpen 0.5s ease-out;
+}
+
+/* ---- Hero stats counter pulse ---- */
+@keyframes counterPulse {
+  0%,
+  100% {
+    text-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    text-shadow: 0 0 20px rgba(59, 130, 246, 0.6);
+  }
+}
+
+.stat-value {
+  animation: counterPulse 3s ease-in-out infinite;
+}
+
+/* ---- Shield pulse ---- */
+@keyframes shieldPulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.3));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.6));
+  }
+}
+
+.shield-pulse {
+  animation: shieldPulse 3s ease-in-out infinite;
+}
+
+/* ---- Step indicator ---- */
+@keyframes stepGlow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(59, 130, 246, 0);
+  }
+}
+
+.step-active {
+  animation: stepGlow 2s ease-in-out infinite;
+}
+
+/* ---- Spinning loader ---- */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+/* ---- Floating particles background effect ---- */
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0px) translateX(0px);
+  }
+  25% {
+    transform: translateY(-10px) translateX(5px);
+  }
+  50% {
+    transform: translateY(-5px) translateX(-5px);
+  }
+  75% {
+    transform: translateY(-15px) translateX(3px);
+  }
+}
+
+/* ---- Scrollbar styling ---- */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0e17;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3a52;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3b82f6;
+}
+
+/* ---- Selection color ---- */
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: #fff;
 }

@@ -1,12 +1,32 @@
 [
   {
     "inputs": [],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidFillId",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidOrderId",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "MakerCannotFill",
     "type": "error"
   },
   {
     "inputs": [],
     "name": "NotMaker",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotOwner",
     "type": "error"
   },
   {
@@ -32,7 +52,22 @@
   },
   {
     "inputs": [],
+    "name": "TransferFailed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "ZamaProtocolUnsupported",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddress",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroDeposit",
     "type": "error"
   },
   {
@@ -61,6 +96,57 @@
         "indexed": true,
         "internalType": "uint256",
         "name": "orderId",
+        "type": "uint256"
+      }
+    ],
+    "name": "AuditorAccessGranted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "oldAuditor",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "newAuditor",
+        "type": "address"
+      }
+    ],
+    "name": "AuditorUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      }
+    ],
+    "name": "FillVolumePublished",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "ethRefunded",
         "type": "uint256"
       }
     ],
@@ -93,6 +179,12 @@
         "internalType": "bool",
         "name": "isBuy",
         "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "ethDeposit",
+        "type": "uint256"
       }
     ],
     "name": "OrderCreated",
@@ -109,19 +201,51 @@
       },
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "ethTransferred",
+        "type": "uint256"
+      }
+    ],
+    "name": "OrderFilled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "address",
-        "name": "maker",
+        "name": "oldOwner",
         "type": "address"
       },
       {
         "indexed": true,
         "internalType": "address",
-        "name": "taker",
+        "name": "newOwner",
         "type": "address"
       }
     ],
-    "name": "OrderFilled",
+    "name": "OwnershipTransferred",
     "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "auditor",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [
@@ -190,7 +314,20 @@
         "type": "uint256"
       }
     ],
-    "stateMutability": "nonpayable",
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "fillCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -199,6 +336,26 @@
         "internalType": "uint256",
         "name": "orderId",
         "type": "uint256"
+      },
+      {
+        "internalType": "externalEuint64",
+        "name": "encTakerPrice",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "takerPriceProof",
+        "type": "bytes"
+      },
+      {
+        "internalType": "externalEuint64",
+        "name": "encTakerAmount",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "takerAmountProof",
+        "type": "bytes"
       }
     ],
     "name": "fillOrder",
@@ -233,16 +390,135 @@
         "type": "uint256"
       }
     ],
+    "name": "getEncryptedTaker",
+    "outputs": [
+      {
+        "internalType": "eaddress",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getFill",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "filledAt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "ethTransferred",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getFillAmount",
+    "outputs": [
+      {
+        "internalType": "euint64",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getFillEncryptedTaker",
+    "outputs": [
+      {
+        "internalType": "eaddress",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getFillPriorityScore",
+    "outputs": [
+      {
+        "internalType": "euint64",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fillId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getFillTotal",
+    "outputs": [
+      {
+        "internalType": "euint64",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      }
+    ],
     "name": "getOrder",
     "outputs": [
       {
         "internalType": "address",
         "name": "maker",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "taker",
         "type": "address"
       },
       {
@@ -264,6 +540,30 @@
         "internalType": "uint256",
         "name": "createdAt",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "ethDeposit",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getOrderFills",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "",
+        "type": "uint256[]"
       }
     ],
     "stateMutability": "view",
@@ -294,6 +594,38 @@
         "internalType": "uint256",
         "name": "orderId",
         "type": "uint256"
+      }
+    ],
+    "name": "getRemainingAmount",
+    "outputs": [
+      {
+        "internalType": "euint64",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getTotalVolume",
+    "outputs": [
+      {
+        "internalType": "euint64",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
       },
       {
         "internalType": "address",
@@ -302,6 +634,19 @@
       }
     ],
     "name": "grantAccess",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      }
+    ],
+    "name": "grantAuditorAccess",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -318,5 +663,61 @@
     ],
     "stateMutability": "view",
     "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "owner",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newAuditor",
+        "type": "address"
+      }
+    ],
+    "name": "setAuditor",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totalFillCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newOwner",
+        "type": "address"
+      }
+    ],
+    "name": "transferOwnership",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "stateMutability": "payable",
+    "type": "receive"
   }
 ]

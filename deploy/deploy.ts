@@ -10,7 +10,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     log: true,
   });
 
-  console.log(`ConfidentialOTC contract: `, deployed.address);
+  console.log(`ConfidentialOTC (Dark Pool) contract: `, deployed.address);
 };
 export default func;
 func.id = "deploy_confidentialOTC";

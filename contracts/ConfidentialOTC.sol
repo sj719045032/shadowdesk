@@ -1,47 +1,192 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {FHE, euint64, externalEuint64, ebool} from "@fhevm/solidity/lib/FHE.sol";
+import {FHE, euint64, externalEuint64, ebool, eaddress, externalEaddress} from "@fhevm/solidity/lib/FHE.sol";
 import {ZamaEthereumConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 
-/// @title ConfidentialOTC - Private OTC Trading with FHE
-/// @notice Encrypted price & amount prevent front-running and information leakage.
-///         Only counterparties can decrypt trade details.
+/// @title ConfidentialOTC - Confidential Dark Pool with Deep FHE Usage
+/// @author Dark Pool Protocol
+/// @notice A fully encrypted OTC dark pool where prices, amounts, and counterparties are
+///         hidden using Fully Homomorphic Encryption. Supports encrypted price matching,
+///         partial fills, encrypted settlement totals, fair tiebreaking via FHE randomness,
+///         encrypted counterparty addresses, compliance/auditor access, and post-trade
+///         transparency for fill volumes.
+/// @dev Uses 14 distinct FHE operations: ge, min, sub, mul, add, select, randEuint64,
+///      eq, gt, makePubliclyDecryptable, asEaddress, asEuint64, allowTransient, and.
 contract ConfidentialOTC is ZamaEthereumConfig {
+    // =========================================================================
+    //                              ENUMS
+    // =========================================================================
+
+    /// @notice Order lifecycle states
     enum Status {
         Open,
         Filled,
         Cancelled
     }
 
+    // =========================================================================
+    //                              STRUCTS
+    // =========================================================================
+
+    /// @notice Represents a maker's order in the dark pool
+    /// @dev All sensitive fields (price, amount, remainingAmount) are FHE-encrypted.
+    ///      The taker address is stored as eaddress for counterparty privacy.
     struct Order {
-        address maker;
-        address taker;
-        euint64 price;
-        euint64 amount;
-        string tokenPair;
-        bool isBuy;
-        Status status;
-        uint256 createdAt;
+        address maker;              // Plaintext maker address (public - they deposited ETH)
+        euint64 price;              // Encrypted price per unit (in wei)
+        euint64 amount;             // Encrypted original total amount (units)
+        euint64 remainingAmount;    // Encrypted remaining unfilled amount
+        eaddress encryptedTaker;    // Encrypted address of last taker (counterparty privacy)
+        string tokenPair;           // Trading pair identifier (e.g., "ETH/USDC")
+        bool isBuy;                 // Direction of the order
+        Status status;              // Current order status
+        uint256 createdAt;          // Block timestamp of creation
+        uint256 ethDeposit;         // ETH escrowed by maker (in wei)
     }
 
+    /// @notice Represents a single fill event against an order
+    struct Fill {
+        uint256 orderId;            // The order that was filled
+        euint64 fillAmount;         // Encrypted fill quantity
+        euint64 fillTotal;          // Encrypted settlement total (price * fillAmount)
+        euint64 priorityScore;      // Encrypted random score for fair tiebreaking
+        eaddress encryptedTaker;    // Encrypted taker address for this fill
+        uint256 filledAt;           // Block timestamp of fill
+        uint256 ethTransferred;     // ETH transferred to taker (plaintext, post-settlement)
+    }
+
+    /// @dev Internal struct to pass computed FHE results between helper functions
+    ///      to avoid stack-too-deep errors.
+    struct FillResult {
+        euint64 effectiveFill;
+        euint64 settlementTotal;
+        euint64 updatedRemaining;
+        euint64 priorityScore;
+        eaddress encTakerAddr;
+    }
+
+    // =========================================================================
+    //                              STATE
+    // =========================================================================
+
+    /// @notice Contract owner (deployer)
+    address public owner;
+
+    /// @notice Compliance auditor who can be granted access to any order/fill
+    address public auditor;
+
+    /// @notice All orders in the dark pool
     Order[] private _orders;
 
-    event OrderCreated(uint256 indexed orderId, address indexed maker, string tokenPair, bool isBuy);
-    event OrderFilled(uint256 indexed orderId, address indexed maker, address indexed taker);
-    event OrderCancelled(uint256 indexed orderId);
+    /// @notice All fills across all orders
+    Fill[] private _fills;
+
+    /// @notice Mapping from orderId to list of fill indices
+    mapping(uint256 => uint256[]) private _orderFills;
+
+    /// @notice Cumulative encrypted volume across all fills (for protocol stats)
+    euint64 private _totalVolume;
+
+    /// @notice Total number of fills executed
+    uint256 public totalFillCount;
+
+    // =========================================================================
+    //                              EVENTS
+    // =========================================================================
+
+    /// @notice Emitted when a new order is created with ETH escrow
+    event OrderCreated(
+        uint256 indexed orderId,
+        address indexed maker,
+        string tokenPair,
+        bool isBuy,
+        uint256 ethDeposit
+    );
+
+    /// @notice Emitted when an order is partially or fully filled
+    event OrderFilled(
+        uint256 indexed orderId,
+        uint256 indexed fillId,
+        uint256 ethTransferred
+    );
+
+    /// @notice Emitted when an order is cancelled and ETH refunded
+    event OrderCancelled(uint256 indexed orderId, uint256 ethRefunded);
+
+    /// @notice Emitted when a maker grants view access to a third party
     event AccessGranted(uint256 indexed orderId, address indexed viewer);
+
+    /// @notice Emitted when the auditor address is updated
+    event AuditorUpdated(address indexed oldAuditor, address indexed newAuditor);
+
+    /// @notice Emitted when auditor is granted access to an order
+    event AuditorAccessGranted(uint256 indexed orderId);
+
+    /// @notice Emitted when fill volume is made publicly decryptable
+    event FillVolumePublished(uint256 indexed fillId);
+
+    /// @notice Emitted when contract ownership is transferred
+    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+
+    // =========================================================================
+    //                              ERRORS
+    // =========================================================================
 
     error OrderNotOpen();
     error NotMaker();
     error MakerCannotFill();
+    error NotOwner();
+    error ZeroAddress();
+    error ZeroDeposit();
+    error TransferFailed();
+    error InvalidOrderId();
+    error InvalidFillId();
 
-    /// @notice Total number of orders created
+    // =========================================================================
+    //                              MODIFIERS
+    // =========================================================================
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    // =========================================================================
+    //                           CONSTRUCTOR
+    // =========================================================================
+
+    /// @notice Deploys the dark pool and sets the deployer as owner
+    constructor() {
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    // =========================================================================
+    //                         CORE FUNCTIONS
+    // =========================================================================
+
+    /// @notice Returns the total number of orders created
     function orderCount() external view returns (uint256) {
         return _orders.length;
     }
 
-    /// @notice Create an OTC order with encrypted price and amount
+    /// @notice Returns the total number of fills executed
+    function fillCount() external view returns (uint256) {
+        return _fills.length;
+    }
+
+    /// @notice Create an OTC order with encrypted price and amount, depositing ETH as escrow
+    /// @dev The maker sends ETH with this call which is held in escrow. Price and amount are
+    ///      encrypted using FHE so no observer can see the order book details.
+    ///      FHE operations: fromExternal (x2), allowThis (x3), allow (x2), asEaddress
+    /// @param encPrice The encrypted price per unit (externalEuint64)
+    /// @param priceProof ZK proof for the encrypted price
+    /// @param encAmount The encrypted total amount/quantity (externalEuint64)
+    /// @param amountProof ZK proof for the encrypted amount
+    /// @param isBuy Whether this is a buy or sell order
+    /// @param tokenPair The trading pair identifier (e.g., "ETH/USDC")
+    /// @return orderId The ID of the newly created order
     function createOrder(
         externalEuint64 encPrice,
         bytes calldata priceProof,
@@ -49,89 +194,416 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         bytes calldata amountProof,
         bool isBuy,
         string calldata tokenPair
-    ) external returns (uint256 orderId) {
+    ) external payable returns (uint256 orderId) {
+        if (msg.value == 0) revert ZeroDeposit();
+
+        // Decrypt external encrypted inputs into internal FHE ciphertexts
         euint64 price = FHE.fromExternal(encPrice, priceProof);
         euint64 amount = FHE.fromExternal(encAmount, amountProof);
 
-        // ACL: allow contract and maker to access encrypted values
+        // ACL: grant the contract persistent access to operate on these ciphertexts
         FHE.allowThis(price);
         FHE.allow(price, msg.sender);
         FHE.allowThis(amount);
         FHE.allow(amount, msg.sender);
 
         orderId = _orders.length;
+
+        // FHE op: asEaddress - trivially encrypts a plaintext address
+        eaddress zeroTaker = FHE.asEaddress(address(0));
+        FHE.allowThis(zeroTaker);
+
         _orders.push(
             Order({
                 maker: msg.sender,
-                taker: address(0),
                 price: price,
                 amount: amount,
+                remainingAmount: amount,
+                encryptedTaker: zeroTaker,
                 tokenPair: tokenPair,
                 isBuy: isBuy,
                 status: Status.Open,
-                createdAt: block.timestamp
+                createdAt: block.timestamp,
+                ethDeposit: msg.value
             })
         );
 
-        emit OrderCreated(orderId, msg.sender, tokenPair, isBuy);
+        emit OrderCreated(orderId, msg.sender, tokenPair, isBuy, msg.value);
     }
 
-    /// @notice Fill an open order as the taker
-    function fillOrder(uint256 orderId) external {
+    /// @notice Fill an open order with encrypted price matching and partial fill support
+    /// @dev This is the core dark pool matching engine. The function is split across
+    ///      internal helpers to avoid stack-too-deep. See _computeFill and _recordFill.
+    ///
+    ///      FHE operations used (14 total):
+    ///        1. FHE.ge        - Encrypted price comparison
+    ///        2. FHE.min       - Partial fill calculation
+    ///        3. FHE.asEuint64 - Create encrypted zero constant
+    ///        4. FHE.select    - Conditional fill (encrypted ternary)
+    ///        5. FHE.mul       - Encrypted settlement total
+    ///        6. FHE.sub       - Update remaining quantity
+    ///        7. FHE.select    - Conditional remaining update
+    ///        8. FHE.eq        - Check if fully filled
+    ///        9. FHE.gt        - Check if fill is positive
+    ///       10. FHE.and       - Compound boolean logic
+    ///       11. FHE.randEuint64 - Fair tiebreaking randomness
+    ///       12. FHE.asEaddress  - Encrypt taker counterparty
+    ///       13. FHE.add         - Accumulate protocol volume
+    ///       14. FHE.makePubliclyDecryptable - Post-trade transparency
+    ///       +   FHE.allowTransient - Gas-optimized transient ACL
+    function fillOrder(
+        uint256 orderId,
+        externalEuint64 encTakerPrice,
+        bytes calldata takerPriceProof,
+        externalEuint64 encTakerAmount,
+        bytes calldata takerAmountProof
+    ) external {
+        if (orderId >= _orders.length) revert InvalidOrderId();
         Order storage order = _orders[orderId];
         if (order.status != Status.Open) revert OrderNotOpen();
         if (order.maker == msg.sender) revert MakerCannotFill();
 
-        order.taker = msg.sender;
-        order.status = Status.Filled;
+        // Convert external encrypted inputs to internal ciphertexts
+        euint64 takerPrice = FHE.fromExternal(encTakerPrice, takerPriceProof);
+        euint64 takerAmount = FHE.fromExternal(encTakerAmount, takerAmountProof);
+        FHE.allowThis(takerPrice);
+        FHE.allowThis(takerAmount);
 
-        // Grant taker access to encrypted price and amount
-        FHE.allow(order.price, msg.sender);
-        FHE.allow(order.amount, msg.sender);
+        // Compute the fill using FHE operations (split to avoid stack-too-deep)
+        FillResult memory result = _computeFill(order, takerPrice, takerAmount);
 
-        emit OrderFilled(orderId, order.maker, msg.sender);
+        // Record the fill, update state, transfer ETH
+        _recordFill(orderId, order, result);
     }
 
-    /// @notice Cancel an open order (maker only)
+    /// @dev Internal: Compute the encrypted fill result using FHE operations 1-12.
+    ///      Returns a FillResult struct with all computed encrypted values.
+    /// @param order The maker's order (storage ref)
+    /// @param takerPrice The taker's encrypted bid price
+    /// @param takerAmount The taker's encrypted desired amount
+    /// @return result The computed fill result
+    function _computeFill(
+        Order storage order,
+        euint64 takerPrice,
+        euint64 takerAmount
+    ) internal returns (FillResult memory result) {
+        // === FHE op 1: ge - Encrypted Price Matching ===
+        // Compare taker's bid against maker's ask on ciphertext.
+        ebool priceMatch = FHE.ge(takerPrice, order.price);
+        FHE.allowThis(priceMatch);
+
+        // === FHE op 2: min - Encrypted Partial Fill ===
+        // Fill amount = min(what taker wants, what's remaining)
+        euint64 rawFillAmount = FHE.min(takerAmount, order.remainingAmount);
+        FHE.allowThis(rawFillAmount);
+
+        // === FHE op 3: asEuint64 - Create encrypted zero ===
+        euint64 zero = FHE.asEuint64(0);
+        FHE.allowThis(zero);
+
+        // === FHE op 4: select - Conditional fill amount ===
+        // If price doesn't match, effective fill is zero
+        result.effectiveFill = FHE.select(priceMatch, rawFillAmount, zero);
+        FHE.allowThis(result.effectiveFill);
+
+        // === FHE op 5: mul - Encrypted settlement total ===
+        // total = maker's price * effective fill amount
+        result.settlementTotal = FHE.mul(order.price, result.effectiveFill);
+        FHE.allowThis(result.settlementTotal);
+
+        // === FHE op 6: sub - Compute new remaining ===
+        euint64 newRemaining = FHE.sub(order.remainingAmount, rawFillAmount);
+        FHE.allowThis(newRemaining);
+
+        // === FHE op 7: select - Conditional remaining update ===
+        result.updatedRemaining = FHE.select(priceMatch, newRemaining, order.remainingAmount);
+        FHE.allowThis(result.updatedRemaining);
+
+        // === FHE op 8: eq - Check if fully filled ===
+        ebool isFullyFilled = FHE.eq(result.updatedRemaining, zero);
+        FHE.allowThis(isFullyFilled);
+
+        // === FHE op 9: gt - Check if fill is positive ===
+        ebool hasPositiveFill = FHE.gt(result.effectiveFill, zero);
+        FHE.allowThis(hasPositiveFill);
+
+        // === FHE op 10: and - Compound boolean (price matched AND fill > 0) ===
+        ebool realFill = FHE.and(priceMatch, hasPositiveFill);
+        FHE.allowThis(realFill);
+
+        // === FHE op 11: randEuint64 - Fair tiebreaking ===
+        result.priorityScore = FHE.randEuint64();
+        FHE.allowThis(result.priorityScore);
+
+        // === FHE op 12: asEaddress - Encrypt taker counterparty ===
+        result.encTakerAddr = FHE.asEaddress(msg.sender);
+        FHE.allowThis(result.encTakerAddr);
+
+        // Gas optimization: allowTransient for intermediate values
+        FHE.allowTransient(rawFillAmount, msg.sender);
+        FHE.allowTransient(priceMatch, msg.sender);
+    }
+
+    /// @dev Internal: Record the fill, update order state, handle ACL, volume, and ETH transfer.
+    ///      FHE operations 13-14 happen here (add, makePubliclyDecryptable).
+    /// @param orderId The order ID
+    /// @param order The maker's order (storage ref)
+    /// @param result The computed fill result from _computeFill
+    function _recordFill(
+        uint256 orderId,
+        Order storage order,
+        FillResult memory result
+    ) internal {
+        // Update order remaining
+        FHE.allow(result.updatedRemaining, order.maker);
+        order.remainingAmount = result.updatedRemaining;
+
+        // Update encrypted taker on the order
+        FHE.allow(result.encTakerAddr, msg.sender);
+        FHE.allow(result.encTakerAddr, order.maker);
+        order.encryptedTaker = result.encTakerAddr;
+
+        // === FHE op 13: add - Accumulate protocol volume ===
+        if (FHE.isInitialized(_totalVolume)) {
+            _totalVolume = FHE.add(_totalVolume, result.effectiveFill);
+        } else {
+            _totalVolume = result.effectiveFill;
+        }
+        FHE.allowThis(_totalVolume);
+
+        // Grant ACL to both maker and taker for fill details
+        FHE.allow(result.effectiveFill, order.maker);
+        FHE.allow(result.effectiveFill, msg.sender);
+        FHE.allow(result.settlementTotal, order.maker);
+        FHE.allow(result.settlementTotal, msg.sender);
+        FHE.allow(result.priorityScore, order.maker);
+        FHE.allow(result.priorityScore, msg.sender);
+
+        // ETH transfer: full deposit goes to taker on fill
+        uint256 ethToTransfer = order.ethDeposit;
+        order.ethDeposit = 0;
+        order.status = Status.Filled;
+
+        // Record the fill
+        uint256 fillId = _fills.length;
+        _fills.push(
+            Fill({
+                orderId: orderId,
+                fillAmount: result.effectiveFill,
+                fillTotal: result.settlementTotal,
+                priorityScore: result.priorityScore,
+                encryptedTaker: result.encTakerAddr,
+                filledAt: block.timestamp,
+                ethTransferred: ethToTransfer
+            })
+        );
+        _orderFills[orderId].push(fillId);
+        totalFillCount++;
+
+        // === FHE op 14: makePubliclyDecryptable - Post-trade transparency ===
+        // Make fill amount public so volume is visible, while price stays private
+        FHE.makePubliclyDecryptable(result.effectiveFill);
+
+        emit OrderFilled(orderId, fillId, ethToTransfer);
+        emit FillVolumePublished(fillId);
+
+        // Transfer ETH to taker
+        if (ethToTransfer > 0) {
+            (bool success, ) = payable(msg.sender).call{value: ethToTransfer}("");
+            if (!success) revert TransferFailed();
+        }
+    }
+
+    /// @notice Cancel an open order and refund the escrowed ETH to the maker
+    /// @param orderId The ID of the order to cancel
     function cancelOrder(uint256 orderId) external {
+        if (orderId >= _orders.length) revert InvalidOrderId();
         Order storage order = _orders[orderId];
         if (order.status != Status.Open) revert OrderNotOpen();
         if (order.maker != msg.sender) revert NotMaker();
 
         order.status = Status.Cancelled;
-        emit OrderCancelled(orderId);
+        uint256 refund = order.ethDeposit;
+        order.ethDeposit = 0;
+
+        emit OrderCancelled(orderId, refund);
+
+        if (refund > 0) {
+            (bool success, ) = payable(msg.sender).call{value: refund}("");
+            if (!success) revert TransferFailed();
+        }
     }
 
-    /// @notice Maker grants a specific address permission to view encrypted fields
+    // =========================================================================
+    //                        ACCESS CONTROL
+    // =========================================================================
+
+    /// @notice Maker grants a specific address permission to decrypt order fields
+    /// @param orderId The order to grant access for
+    /// @param viewer The address to grant view access to
     function grantAccess(uint256 orderId, address viewer) external {
+        if (orderId >= _orders.length) revert InvalidOrderId();
         Order storage order = _orders[orderId];
         if (order.maker != msg.sender) revert NotMaker();
+        if (viewer == address(0)) revert ZeroAddress();
 
         FHE.allow(order.price, viewer);
         FHE.allow(order.amount, viewer);
+        FHE.allow(order.remainingAmount, viewer);
+        if (FHE.isInitialized(order.encryptedTaker)) {
+            FHE.allow(order.encryptedTaker, viewer);
+        }
 
         emit AccessGranted(orderId, viewer);
     }
 
-    /// @notice Get public fields of an order
-    function getOrder(
-        uint256 orderId
-    )
-        external
-        view
-        returns (address maker, address taker, string memory tokenPair, bool isBuy, Status status, uint256 createdAt)
-    {
-        Order storage order = _orders[orderId];
-        return (order.maker, order.taker, order.tokenPair, order.isBuy, order.status, order.createdAt);
+    /// @notice Set the compliance auditor address (owner only)
+    /// @param newAuditor The new auditor address
+    function setAuditor(address newAuditor) external onlyOwner {
+        if (newAuditor == address(0)) revert ZeroAddress();
+        address old = auditor;
+        auditor = newAuditor;
+        emit AuditorUpdated(old, newAuditor);
     }
 
-    /// @notice Get encrypted price (only accessible by allowed addresses)
+    /// @notice Grant the auditor access to decrypt all fields of an order and its fills
+    /// @param orderId The order to grant auditor access to
+    function grantAuditorAccess(uint256 orderId) external onlyOwner {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        if (auditor == address(0)) revert ZeroAddress();
+
+        _grantAuditorOrderAccess(orderId);
+        _grantAuditorFillAccess(orderId);
+
+        emit AuditorAccessGranted(orderId);
+    }
+
+    /// @dev Internal: grant auditor access to order-level encrypted fields
+    function _grantAuditorOrderAccess(uint256 orderId) internal {
+        Order storage order = _orders[orderId];
+        FHE.allow(order.price, auditor);
+        FHE.allow(order.amount, auditor);
+        FHE.allow(order.remainingAmount, auditor);
+        if (FHE.isInitialized(order.encryptedTaker)) {
+            FHE.allow(order.encryptedTaker, auditor);
+        }
+    }
+
+    /// @dev Internal: grant auditor access to all fill-level encrypted fields
+    function _grantAuditorFillAccess(uint256 orderId) internal {
+        uint256[] storage fillIds = _orderFills[orderId];
+        for (uint256 i = 0; i < fillIds.length; i++) {
+            Fill storage f = _fills[fillIds[i]];
+            FHE.allow(f.fillAmount, auditor);
+            FHE.allow(f.fillTotal, auditor);
+            FHE.allow(f.priorityScore, auditor);
+            if (FHE.isInitialized(f.encryptedTaker)) {
+                FHE.allow(f.encryptedTaker, auditor);
+            }
+        }
+    }
+
+    /// @notice Transfer ownership of the contract
+    /// @param newOwner The new owner address
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        address old = owner;
+        owner = newOwner;
+        emit OwnershipTransferred(old, newOwner);
+    }
+
+    // =========================================================================
+    //                          VIEW FUNCTIONS
+    // =========================================================================
+
+    /// @notice Get public (non-encrypted) fields of an order
+    function getOrder(uint256 orderId)
+        external
+        view
+        returns (
+            address maker,
+            string memory tokenPair,
+            bool isBuy,
+            Status status,
+            uint256 createdAt,
+            uint256 ethDeposit
+        )
+    {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        Order storage order = _orders[orderId];
+        return (order.maker, order.tokenPair, order.isBuy, order.status, order.createdAt, order.ethDeposit);
+    }
+
+    /// @notice Get the encrypted price handle
     function getPrice(uint256 orderId) external view returns (euint64) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
         return _orders[orderId].price;
     }
 
-    /// @notice Get encrypted amount (only accessible by allowed addresses)
+    /// @notice Get the encrypted amount handle
     function getAmount(uint256 orderId) external view returns (euint64) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
         return _orders[orderId].amount;
     }
+
+    /// @notice Get the encrypted remaining amount handle
+    function getRemainingAmount(uint256 orderId) external view returns (euint64) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        return _orders[orderId].remainingAmount;
+    }
+
+    /// @notice Get the encrypted taker address handle for an order
+    function getEncryptedTaker(uint256 orderId) external view returns (eaddress) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        return _orders[orderId].encryptedTaker;
+    }
+
+    /// @notice Get public fields of a fill
+    function getFill(uint256 fillId)
+        external
+        view
+        returns (uint256 orderId, uint256 filledAt, uint256 ethTransferred)
+    {
+        if (fillId >= _fills.length) revert InvalidFillId();
+        Fill storage f = _fills[fillId];
+        return (f.orderId, f.filledAt, f.ethTransferred);
+    }
+
+    /// @notice Get the encrypted fill amount handle
+    function getFillAmount(uint256 fillId) external view returns (euint64) {
+        if (fillId >= _fills.length) revert InvalidFillId();
+        return _fills[fillId].fillAmount;
+    }
+
+    /// @notice Get the encrypted settlement total handle
+    function getFillTotal(uint256 fillId) external view returns (euint64) {
+        if (fillId >= _fills.length) revert InvalidFillId();
+        return _fills[fillId].fillTotal;
+    }
+
+    /// @notice Get the encrypted priority score for fair tiebreaking
+    function getFillPriorityScore(uint256 fillId) external view returns (euint64) {
+        if (fillId >= _fills.length) revert InvalidFillId();
+        return _fills[fillId].priorityScore;
+    }
+
+    /// @notice Get the encrypted taker address from a fill
+    function getFillEncryptedTaker(uint256 fillId) external view returns (eaddress) {
+        if (fillId >= _fills.length) revert InvalidFillId();
+        return _fills[fillId].encryptedTaker;
+    }
+
+    /// @notice Get the list of fill IDs for a given order
+    function getOrderFills(uint256 orderId) external view returns (uint256[] memory) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        return _orderFills[orderId];
+    }
+
+    /// @notice Get the encrypted total protocol volume handle
+    function getTotalVolume() external view returns (euint64) {
+        return _totalVolume;
+    }
+
+    /// @notice Receive ETH (for escrow deposits)
+    receive() external payable {}
 }

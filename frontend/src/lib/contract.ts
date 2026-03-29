@@ -1,9 +1,7 @@
-import { BrowserProvider, Contract, getAddress } from "ethers";
+import { BrowserProvider, Contract, getAddress, parseEther } from "ethers";
 import ABI from "./abi.json";
 
-// Will be set after deployment to Sepolia
 export const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || "";
-
 export const SEPOLIA_CHAIN_ID = 11155111;
 
 export function getProvider() {
@@ -59,11 +57,11 @@ export async function switchToSepolia() {
 export type OrderData = {
   id: number;
   maker: string;
-  taker: string;
   tokenPair: string;
   isBuy: boolean;
   status: number; // 0=Open, 1=Filled, 2=Cancelled
   createdAt: number;
+  ethDeposit: string; // in ETH
 };
 
 export async function fetchAllOrders(): Promise<OrderData[]> {
@@ -75,12 +73,14 @@ export async function fetchAllOrders(): Promise<OrderData[]> {
     orders.push({
       id: i,
       maker: o.maker,
-      taker: o.taker,
       tokenPair: o.tokenPair,
       isBuy: o.isBuy,
       status: Number(o.status),
       createdAt: Number(o.createdAt),
+      ethDeposit: o.ethDeposit.toString(),
     });
   }
   return orders;
 }
+
+export { parseEther };
