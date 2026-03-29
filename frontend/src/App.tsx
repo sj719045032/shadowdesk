@@ -1,6 +1,7 @@
 import { useState, useEffect, createContext, useContext } from "react";
 import { Outlet, NavLink } from "react-router-dom";
 import { connectWallet, switchToSepolia } from "./lib/contract";
+import { getAddress } from "ethers";
 
 type WalletCtx = {
   account: string;
@@ -31,11 +32,11 @@ export default function App() {
         .request({ method: "eth_accounts" })
         .then((result) => {
           const accounts = result as string[];
-          if (accounts.length > 0) setAccount(accounts[0]);
+          if (accounts.length > 0) setAccount(getAddress(accounts[0]));
         });
       window.ethereum.on("accountsChanged", (...args: unknown[]) => {
         const accounts = args[0] as string[];
-        setAccount(accounts[0] || "");
+        setAccount(accounts[0] ? getAddress(accounts[0]) : "");
       });
     }
   }, []);

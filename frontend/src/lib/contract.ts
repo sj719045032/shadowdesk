@@ -1,4 +1,4 @@
-import { BrowserProvider, Contract } from "ethers";
+import { BrowserProvider, Contract, getAddress } from "ethers";
 import ABI from "./abi.json";
 
 // Will be set after deployment to Sepolia
@@ -29,7 +29,7 @@ export async function getContract(withSigner = false) {
 export async function connectWallet(): Promise<string> {
   const provider = getProvider();
   const accounts = await provider.send("eth_requestAccounts", []);
-  return accounts[0];
+  return getAddress(accounts[0]);
 }
 
 export async function switchToSepolia() {

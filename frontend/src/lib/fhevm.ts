@@ -1,4 +1,4 @@
-import { createInstance, SepoliaConfig, type FhevmInstance } from "@zama-fhe/relayer-sdk/web";
+import { initSDK, createInstance, SepoliaConfig, type FhevmInstance } from "@zama-fhe/relayer-sdk/web";
 import { CONTRACT_ADDRESS, getProvider } from "./contract";
 
 let instance: FhevmInstance | null = null;
@@ -6,9 +6,11 @@ let instance: FhevmInstance | null = null;
 export async function getFhevmInstance(): Promise<FhevmInstance> {
   if (instance) return instance;
 
+  await initSDK();
+
   instance = await createInstance({
     ...SepoliaConfig,
-    network: window.ethereum,
+    network: window.ethereum || "https://ethereum-sepolia-rpc.publicnode.com",
   });
 
   return instance;
