@@ -18,7 +18,6 @@ export default function MyTrades() {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [grantModal, setGrantModal] = useState<{ orderId: number; address: string } | null>(null);
   const [grantSuccess, setGrantSuccess] = useState<number | null>(null);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   useEffect(() => {
     if (account) loadMyOrders();
@@ -261,94 +260,87 @@ export default function MyTrades() {
           <div className="text-slate-500 text-sm">Create or fill an order to see it here.</div>
         </div>
       ) : (
-        <div className="border border-[#1e293b] rounded-xl overflow-hidden gradient-border">
-          {orders.map((o, idx) => {
-            const isExpanded = expandedId === o.id;
-            const isMaker = o.maker.toLowerCase() === account.toLowerCase();
-            const _unused = o.tokenDeposit; // deposit info only in expanded view
-            void _unused;
-            return (
-            <div key={o.id} className={`${idx > 0 ? "border-t border-[#1e293b]" : ""} row-enter`} style={{ animationDelay: `${idx * 40}ms` }}>
-              {/* Compact row */}
-              <div
-                onClick={() => setExpandedId(isExpanded ? null : o.id)}
-                className="flex items-center gap-3 px-4 py-3 hover:bg-[#1a2235]/50 cursor-pointer transition-colors"
-              >
-                <span className="font-mono text-xs text-slate-500 w-8">#{o.id}</span>
-                <span className="font-medium text-sm text-slate-200 w-24">{o.tokenPair}</span>
-                <span className={`text-xs font-bold w-12 ${o.isBuy ? "text-emerald-400" : "text-red-400"}`}>{o.isBuy ? "BUY" : "SELL"}</span>
-                <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
-                  o.status === 0 ? "bg-emerald-500/10 text-emerald-400" : o.status === 1 ? "bg-blue-500/10 text-blue-400" : "bg-slate-500/10 text-slate-500"
-                }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${o.status === 0 ? "bg-emerald-400" : o.status === 1 ? "bg-blue-400" : "bg-slate-500"}`} />
-                  {["Open", "Filled", "Cancelled"][o.status]}
-                </span>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full ml-auto ${isMaker ? "bg-purple-500/10 text-purple-400" : "bg-cyan-500/10 text-cyan-400"}`}>
-                  {isMaker ? "Maker" : "Taker"}
-                </span>
-                <svg className={`w-4 h-4 text-slate-500 transition-transform ${isExpanded ? "rotate-180" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg>
-              </div>
-
-              {/* Expanded detail */}
-              {isExpanded && (
-                <div className="px-4 pb-4 pt-1 bg-[#0d1117]/50 border-t border-[#1e293b]/50 space-y-3 page-fade-in">
-                  {/* Price & Amount */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="bg-[#111827] rounded-lg p-3 border border-[#1e293b]/50">
-                      <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Price</div>
+        <div className="border border-[#1e293b] rounded-xl overflow-hidden gradient-border card-glow">
+          <table className="w-full">
+            <thead>
+              <tr className="bg-[#111827]/80 text-slate-500 text-[11px] uppercase tracking-wider">
+                <th className="text-left px-4 py-3 font-semibold">ID</th>
+                <th className="text-left px-4 py-3 font-semibold">Pair</th>
+                <th className="text-left px-4 py-3 font-semibold">Side</th>
+                <th className="text-left px-4 py-3 font-semibold">Price</th>
+                <th className="text-left px-4 py-3 font-semibold">Amount</th>
+                <th className="text-left px-4 py-3 font-semibold">Status</th>
+                <th className="text-left px-4 py-3 font-semibold">Role</th>
+                <th className="text-right px-4 py-3 font-semibold">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {orders.map((o, idx) => {
+                const isMaker = o.maker.toLowerCase() === account.toLowerCase();
+                return (
+                  <tr key={o.id} className={`border-t border-[#1e293b]/60 hover:bg-blue-500/[0.03] transition-colors row-enter`} style={{ animationDelay: `${idx * 50}ms` }}>
+                    <td className="px-4 py-3.5 font-mono text-xs text-slate-500">#{o.id}</td>
+                    <td className="px-4 py-3.5 text-sm font-medium text-slate-200">{o.tokenPair}</td>
+                    <td className="px-4 py-3.5">
+                      <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded ${o.isBuy ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${o.isBuy ? "bg-emerald-400" : "bg-red-400"}`} />
+                        {o.isBuy ? "BUY" : "SELL"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3.5">
                       {o.decryptedPrice !== undefined ? (
-                        <div className={`text-lg font-bold text-emerald-400 ${o.justDecrypted ? "decrypt-reveal" : ""}`}>${o.decryptedPrice.toLocaleString()}</div>
+                        <span className={`text-sm font-medium text-emerald-400 ${o.justDecrypted ? "decrypt-reveal" : ""}`}>${o.decryptedPrice.toLocaleString()}</span>
                       ) : (
-                        <div className="encrypted-badge inline-flex items-center gap-1.5 border border-blue-500/20 rounded px-2 py-0.5 text-xs text-blue-300/80">🔒 Encrypted</div>
+                        <span className="encrypted-badge inline-flex items-center gap-1.5 border border-blue-500/20 rounded-md px-2.5 py-1 text-[11px] text-blue-300/80">🔒 Encrypted</span>
                       )}
-                    </div>
-                    <div className="bg-[#111827] rounded-lg p-3 border border-[#1e293b]/50">
-                      <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Amount</div>
+                    </td>
+                    <td className="px-4 py-3.5">
                       {o.decryptedAmount !== undefined ? (
-                        <div className={`text-lg font-bold text-emerald-400 ${o.justDecrypted ? "decrypt-reveal" : ""}`}>{o.decryptedAmount} {o.tokenPair.split("/")[0]}</div>
+                        <span className={`text-sm font-medium text-emerald-400 ${o.justDecrypted ? "decrypt-reveal" : ""}`}>{o.decryptedAmount} {o.tokenPair.split("/")[0]}</span>
                       ) : (
-                        <div className="encrypted-badge inline-flex items-center gap-1.5 border border-blue-500/20 rounded px-2 py-0.5 text-xs text-blue-300/80">🔒 Encrypted</div>
+                        <span className="encrypted-badge inline-flex items-center gap-1.5 border border-blue-500/20 rounded-md px-2.5 py-1 text-[11px] text-blue-300/80">🔒 Encrypted</span>
                       )}
-                    </div>
-                  </div>
-
-                  {/* Total value */}
-                  {o.decryptedPrice !== undefined && o.decryptedAmount !== undefined && (
-                    <div className={`flex justify-between items-center text-sm bg-[#111827] rounded-lg p-3 border border-[#1e293b]/50 ${o.justDecrypted ? "decrypt-reveal" : ""}`}>
-                      <span className="text-slate-400">Total Value</span>
-                      <span className="font-bold text-blue-400">${(o.decryptedPrice * o.decryptedAmount).toLocaleString()}</span>
-                    </div>
-                  )}
-
-                  {/* Action buttons */}
-                  <div className="flex gap-2">
-                    {o.decryptedPrice === undefined && (
-                      <button onClick={() => handleDecrypt(o.id)} disabled={o.decrypting}
-                        className="flex-1 flex items-center justify-center gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 py-2 rounded-lg text-xs font-medium transition cursor-pointer disabled:opacity-50">
-                        {o.decrypting ? <><span className="w-3 h-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full spinner"/>Decrypting...</> : "🔓 Decrypt"}
-                      </button>
-                    )}
-                    {isMaker && o.status === 0 && (
-                      <>
-                        <button onClick={() => setGrantModal({ orderId: o.id, address: "" })}
-                          className="flex-1 flex items-center justify-center gap-1.5 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 py-2 rounded-lg text-xs font-medium transition cursor-pointer">
-                          Grant Access
-                        </button>
-                        <button onClick={() => handleShareLink(o.id)}
-                          className="flex-1 flex items-center justify-center gap-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 text-cyan-400 py-2 rounded-lg text-xs font-medium transition cursor-pointer">
-                          {copiedId === o.id ? "✓ Copied!" : "Share Link"}
-                        </button>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Timestamp */}
-                  <div className="text-[10px] text-slate-600">{new Date(o.createdAt * 1000).toLocaleString()}</div>
-                </div>
-              )}
-            </div>
-            );
-          })}
+                    </td>
+                    <td className="px-4 py-3.5">
+                      <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-0.5 rounded-full ${
+                        o.status === 0 ? "bg-emerald-500/10 text-emerald-400 status-open" : o.status === 1 ? "bg-blue-500/10 text-blue-400" : "bg-slate-500/10 text-slate-500"
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${o.status === 0 ? "bg-emerald-400" : o.status === 1 ? "bg-blue-400" : "bg-slate-500"}`} />
+                        {["Open", "Filled", "Cancelled"][o.status]}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3.5">
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${isMaker ? "bg-purple-500/10 text-purple-400" : "bg-cyan-500/10 text-cyan-400"}`}>
+                        {isMaker ? "Maker" : "Taker"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3.5 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        {o.decryptedPrice === undefined && (
+                          <button onClick={() => handleDecrypt(o.id)} disabled={o.decrypting}
+                            className="text-[11px] px-2.5 py-1 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 rounded-lg transition cursor-pointer disabled:opacity-50">
+                            {o.decrypting ? "..." : "Decrypt"}
+                          </button>
+                        )}
+                        {isMaker && o.status === 0 && (
+                          <>
+                            <button onClick={(e) => { e.stopPropagation(); setGrantModal({ orderId: o.id, address: "" }); }}
+                              className="text-[11px] px-2.5 py-1 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 rounded-lg transition cursor-pointer">
+                              Grant
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); handleShareLink(o.id); }}
+                              className="text-[11px] px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 text-cyan-400 rounded-lg transition cursor-pointer">
+                              {copiedId === o.id ? "✓" : "Share"}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
