@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { getContract, approveUSDC, getUSDCBalance, getETHBalance, parseUnits } from "../lib/contract";
-import { encryptInputs } from "../lib/fhevm";
+import { getContract, approveCUSDC, approveCWETH, getUSDCBalance, getETHBalance, parseUnits, getCWETH, getCUSDC, CWETH_ADDRESS, CUSDC_ADDRESS } from "../lib/contract";
+import { Link } from "react-router-dom";
+import { encryptInputs, decryptValues } from "../lib/fhevm";
 import { useWallet } from "../App";
 import TransactionModal, { type Step } from "../components/TransactionModal";
 
-const TOKEN_PAIRS = ["ETH/USDC", "BTC/USDC", "SOL/USDC", "AVAX/USDC", "MATIC/USDC"];
+const TOKEN_PAIRS = ["ETH/USDC"];
 
 // Which step are we on
 function computeStep(pair: string, price: string, amount: string, submitting: boolean) {
@@ -26,10 +27,14 @@ export default function CreateOrder() {
   const deposit = side === "sell" ? amount : (price && amount ? String(Number(price) * Number(amount)) : "");
   const [usdcBalance, setUsdcBalance] = useState("");
   const [ethBalance, setEthBalance] = useState("");
+  const [cwethBalance, setCwethBalance] = useState<string | null>(null);
+  const [cusdcBalance, setCusdcBalance] = useState<string | null>(null);
+  const [decryptingBalances, setDecryptingBalances] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [txSteps, setTxSteps] = useState<Step[]>([]);
   const [txModalOpen, setTxModalOpen] = useState(false);
+  const [txModalTitle, setTxModalTitle] = useState("");
   const [txError, setTxError] = useState("");
 
   useEffect(() => {
@@ -39,19 +44,63 @@ export default function CreateOrder() {
     }
   }, [account]);
 
+  async function decryptBalances() {
+    if (!account || !CWETH_ADDRESS || !CUSDC_ADDRESS) return;
+    const steps: Step[] = [
+      { label: "Reading encrypted balances", status: "pending" },
+      { label: "Signing decrypt request", status: "pending" },
+      { label: "Decrypting via KMS", status: "pending" },
+    ];
+    setTxSteps(steps);
+    setTxModalTitle("Decrypting Balances");
+    setTxModalOpen(true);
+    setTxError("");
+    try {
+      setDecryptingBalances(true);
+
+      setTxSteps(s => s.map((x, i) => i === 0 ? { ...x, status: "active" } : x));
+      const cweth = await getCWETH();
+      const cusdc = await getCUSDC();
+      const encCweth = await cweth.balanceOf(account);
+      const encCusdc = await cusdc.balanceOf(account);
+      setTxSteps(s => s.map((x, i) => i === 0 ? { ...x, status: "done" } : i === 1 ? { ...x, status: "active" } : x));
+
+      const results = await decryptValues(
+        [
+          { handle: encCweth.toString(), contractAddress: CWETH_ADDRESS },
+          { handle: encCusdc.toString(), contractAddress: CUSDC_ADDRESS },
+        ],
+        account,
+      );
+      setTxSteps(s => s.map((x, i) => i === 1 ? { ...x, status: "done" } : i === 2 ? { ...x, status: "active" } : x));
+
+      const values = [...results.values()];
+      setCwethBalance(String(Number(values[0] || 0n) / 1e18));
+      setCusdcBalance(String(Number(values[1] || 0n) / 1e6));
+      setTxSteps(s => s.map(x => ({ ...x, status: "done" })));
+    } catch (err) {
+      console.error("Decrypt balances failed:", err);
+      setTxError("Decrypt failed");
+      setTxSteps(s => s.map(x => x.status === "active" ? { ...x, status: "error" } : x));
+    } finally {
+      setDecryptingBalances(false);
+    }
+  }
+
   const currentStep = computeStep(pair, price, amount, submitting);
 
   function makeSteps(isBuy: boolean): Step[] {
     if (isBuy) {
       return [
         { label: "Encrypting price & amount", status: "pending" },
-        { label: "Approving USDC", status: "pending" },
+        { label: "Approving cUSDC", status: "pending" },
         { label: "Submitting transaction", status: "pending" },
         { label: "Waiting for confirmation", status: "pending" },
       ];
     }
     return [
       { label: "Encrypting price & amount", status: "pending" },
+      { label: "Approving cWETH", status: "pending" },
       { label: "Submitting transaction", status: "pending" },
       { label: "Waiting for confirmation", status: "pending" },
     ];
@@ -83,9 +132,20 @@ export default function CreateOrder() {
       return;
     }
 
+    // Check confidential token balance if already decrypted
+    if (side === "sell" && cwethBalance !== null && Number(deposit) > Number(cwethBalance)) {
+      setError(`Insufficient cWETH balance (have ${cwethBalance}, need ${deposit}). Wrap more in Vault.`);
+      return;
+    }
+    if (side === "buy" && cusdcBalance !== null && Number(deposit) > Number(cusdcBalance)) {
+      setError(`Insufficient cUSDC balance (have ${cusdcBalance}, need ${deposit}). Wrap more in Vault.`);
+      return;
+    }
+
     const isBuy = side === "buy";
     const steps = makeSteps(isBuy);
     setTxSteps(steps);
+    setTxModalTitle(isBuy ? "Creating BUY Order" : "Creating SELL Order");
     setTxModalOpen(true);
 
     try {
@@ -101,9 +161,9 @@ export default function CreateOrder() {
       const contract = await getContract(true);
 
       if (isBuy) {
-        // Step: Approving USDC
+        // Step: Approving cUSDC
         updateStep(stepIdx, "active");
-        await approveUSDC(deposit);
+        await approveCUSDC(deposit);
         updateStep(stepIdx, "done");
         stepIdx++;
 
@@ -116,6 +176,7 @@ export default function CreateOrder() {
           encrypted.inputProof,
           true,
           pair,
+          0,
           parseUnits(deposit, 6),
         );
         updateStep(stepIdx, "done");
@@ -126,6 +187,12 @@ export default function CreateOrder() {
         await tx.wait();
         updateStep(stepIdx, "done");
       } else {
+        // Step: Approving cWETH
+        updateStep(stepIdx, "active");
+        await approveCWETH(deposit);
+        updateStep(stepIdx, "done");
+        stepIdx++;
+
         // Step: Submitting transaction
         updateStep(stepIdx, "active");
         const tx = await contract.createOrder(
@@ -135,8 +202,8 @@ export default function CreateOrder() {
           encrypted.inputProof,
           false,
           pair,
+          parseUnits(deposit, 18),
           0,
-          { value: parseUnits(deposit, 18) },
         );
         updateStep(stepIdx, "done");
         stepIdx++;
@@ -167,9 +234,8 @@ export default function CreateOrder() {
     { num: 3, label: "Encrypt & Submit" },
   ];
 
-  const depositLabel = side === "sell" ? "ETH Deposit" : "USDC Deposit";
-  const depositUnit = side === "sell" ? "ETH" : "USDC";
-  const relevantBalance = side === "sell" ? ethBalance : usdcBalance;
+  const depositLabel = side === "sell" ? "cWETH Deposit" : "cUSDC Deposit";
+  const depositUnit = side === "sell" ? "cWETH" : "cUSDC";
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -209,7 +275,7 @@ export default function CreateOrder() {
       {/* Transaction modal */}
       <TransactionModal
         open={txModalOpen}
-        title={side === "sell" ? "Creating SELL Order" : "Creating BUY Order"}
+        title={txModalTitle}
         steps={txSteps}
         error={txError}
         onClose={() => { setTxModalOpen(false); setTxError(""); }}
@@ -268,7 +334,7 @@ export default function CreateOrder() {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 11 12 6 7 11"/><line x1="12" y1="18" x2="12" y2="6"/></svg>
                   BUY
                 </span>
-                <span className="block text-[10px] font-normal mt-0.5 opacity-70">Deposit USDC</span>
+                <span className="block text-[10px] font-normal mt-0.5 opacity-70">Deposit cUSDC</span>
               </button>
               <button
                 type="button"
@@ -283,7 +349,7 @@ export default function CreateOrder() {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="7 13 12 18 17 13"/><line x1="12" y1="6" x2="12" y2="18"/></svg>
                   SELL
                 </span>
-                <span className="block text-[10px] font-normal mt-0.5 opacity-70">Deposit ETH</span>
+                <span className="block text-[10px] font-normal mt-0.5 opacity-70">Deposit cWETH</span>
               </button>
             </div>
           </div>
@@ -305,7 +371,7 @@ export default function CreateOrder() {
               />
               <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-xs text-slate-500">
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-                FHE
+                Encrypted
               </div>
             </div>
           </div>
@@ -327,9 +393,45 @@ export default function CreateOrder() {
               />
               <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-xs text-slate-500">
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-                FHE
+                Encrypted
               </div>
             </div>
+          </div>
+
+          {/* Balances + Vault link */}
+          <div className="mt-4 bg-[#0d1117] rounded-lg p-3 border border-[#1e293b]/50 space-y-2">
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-slate-500">Your Wallet</span>
+              <div className="flex gap-3 text-slate-400">
+                <span>{ethBalance ? parseFloat(Number(ethBalance).toFixed(6)) : "—"} ETH</span>
+                <span>{usdcBalance ? Number(usdcBalance).toLocaleString() : "—"} USDC</span>
+              </div>
+            </div>
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-slate-500">Confidential Tokens</span>
+              <div className="flex items-center gap-3">
+                {cwethBalance !== null ? (
+                  <span className={`${side === "sell" ? "text-emerald-400" : "text-slate-400"}`}>{parseFloat(Number(cwethBalance).toFixed(8))} cWETH</span>
+                ) : (
+                  <span className={`${side === "sell" ? "text-blue-400" : "text-slate-400"}`}>🔒 cWETH</span>
+                )}
+                {cusdcBalance !== null ? (
+                  <span className={`${side === "buy" ? "text-emerald-400" : "text-slate-400"}`}>{parseFloat(Number(cusdcBalance).toFixed(6))} cUSDC</span>
+                ) : (
+                  <span className={`${side === "buy" ? "text-blue-400" : "text-slate-400"}`}>🔒 cUSDC</span>
+                )}
+                {cwethBalance === null && (
+                  <button onClick={decryptBalances} disabled={decryptingBalances}
+                    className="text-[10px] px-2 py-0.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 rounded transition cursor-pointer disabled:opacity-50">
+                    {decryptingBalances ? "..." : "Decrypt"}
+                  </button>
+                )}
+              </div>
+            </div>
+            <Link to="/vault" className="flex items-center justify-center gap-1.5 text-[11px] text-blue-400 hover:text-blue-300 bg-blue-500/5 hover:bg-blue-500/10 border border-blue-500/10 rounded-lg py-1.5 transition cursor-pointer">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+              Wrap assets in Vault →
+            </Link>
           </div>
         </div>
 
@@ -363,29 +465,6 @@ export default function CreateOrder() {
                 <span className="font-medium text-slate-200">{deposit ? Number(deposit).toLocaleString() : "—"} {depositUnit}</span>
               </div>
 
-              {/* Balances */}
-              <div className="flex justify-between items-center text-xs text-slate-500">
-                <span>Your Balances:</span>
-                <div className="flex gap-3">
-                  {ethBalance && (
-                    <span className={side === "sell" ? "text-blue-400" : ""}>
-                      {Number(ethBalance).toFixed(4)} ETH
-                    </span>
-                  )}
-                  {usdcBalance && (
-                    <span className={side === "buy" ? "text-blue-400" : ""}>
-                      {Number(usdcBalance).toLocaleString()} USDC
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {relevantBalance && Number(deposit) > Number(relevantBalance) && (
-                <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-                  Insufficient {depositUnit} balance
-                </div>
-              )}
-
               <div className="h-px bg-[#1e293b]" />
               <div className="flex justify-between items-center text-sm">
                 <span className="text-slate-400">Total Value</span>
@@ -403,8 +482,8 @@ export default function CreateOrder() {
                 <span className="text-xs text-blue-300/70 leading-relaxed">
                   Price, amount, and total will be encrypted using FHE before submission.
                   {side === "sell"
-                    ? " ETH will be sent with the transaction as collateral."
-                    : " USDC will be approved and transferred as collateral."}
+                    ? " cWETH will be approved and transferred as collateral."
+                    : " cUSDC will be approved and transferred as collateral."}
                 </span>
               </div>
             </div>
@@ -444,8 +523,8 @@ export default function CreateOrder() {
                   <path d="M7 11V7a5 5 0 0110 0v4"/>
                 </svg>
                 {side === "sell"
-                  ? `Create SELL Order (deposit ${deposit} ETH)`
-                  : `Create BUY Order (deposit ${deposit} USDC)`}
+                  ? `Create SELL Order (deposit ${deposit} cWETH)`
+                  : `Create BUY Order (deposit ${deposit} cUSDC)`}
               </span>
             )}
           </button>

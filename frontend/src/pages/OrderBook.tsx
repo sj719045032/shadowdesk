@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { fetchAllOrders, type OrderData, getContract, CONTRACT_ADDRESS, approveUSDC, parseUnits } from "../lib/contract";
+import { fetchAllOrders, type OrderData, getContract, CONTRACT_ADDRESS, approveCUSDC, approveCWETH, parseUnits } from "../lib/contract";
 import { useWallet } from "../App";
 import { encryptInputs, decryptValues, unscaleFromFHE } from "../lib/fhevm";
 import TransactionModal, { type Step } from "../components/TransactionModal";
@@ -138,14 +138,21 @@ export default function OrderBook() {
     const steps: Step[] = isSellOrder
       ? [
           { label: "Encrypting bid", status: "pending" },
-          { label: "Approving USDC", status: "pending" },
-          { label: "Submitting fill", status: "pending" },
-          { label: "Waiting for confirmation", status: "pending" },
+          { label: "Approving cUSDC", status: "pending" },
+          { label: "Initiating fill (FHE matching)", status: "pending" },
+          { label: "Waiting for TX1 confirmation", status: "pending" },
+          { label: "Decrypting match result", status: "pending" },
+          { label: "Settling fill", status: "pending" },
+          { label: "Waiting for TX2 confirmation", status: "pending" },
         ]
       : [
           { label: "Encrypting bid", status: "pending" },
-          { label: "Submitting fill (sending ETH)", status: "pending" },
-          { label: "Waiting for confirmation", status: "pending" },
+          { label: "Approving cWETH", status: "pending" },
+          { label: "Initiating fill (FHE matching)", status: "pending" },
+          { label: "Waiting for TX1 confirmation", status: "pending" },
+          { label: "Decrypting match result", status: "pending" },
+          { label: "Settling fill", status: "pending" },
+          { label: "Waiting for TX2 confirmation", status: "pending" },
         ];
     openTxModal("Filling Order", steps);
 
@@ -154,7 +161,7 @@ export default function OrderBook() {
       setFillError("");
       let stepIdx = 0;
 
-      // Step: Encrypting
+      // Step 1: Encrypting bid
       updateTxStep(stepIdx, "active");
       const encrypted = await encryptInputs(account, price, fillAmt);
       updateTxStep(stepIdx, "done");
@@ -162,58 +169,80 @@ export default function OrderBook() {
 
       const contract = await getContract(true);
 
+      let ethAmt: string;
+      let usdcAmt: string;
+
       if (fillingOrder.isBuy) {
-        // Step: Submitting fill (sending ETH)
+        // Fill BUY order: taker pays cWETH, receives cUSDC
+        ethAmt = String(fillAmt);
+        usdcAmt = String(fillAmt * price);
+
+        // Step 2: Approving cWETH
         updateTxStep(stepIdx, "active");
-        const ethAmount = String(fillAmt);
-        const usdcToReceive = String(fillAmt * price);
-        const tx = await contract.fillOrder(
-          fillingOrder.id,
-          encrypted.handles[0],
-          encrypted.inputProof,
-          encrypted.handles[1],
-          encrypted.inputProof,
-          parseUnits(ethAmount, 18),       // takerEthAmount (taker pays)
-          parseUnits(usdcToReceive, 6),    // takerUsdcAmount (taker receives)
-          { value: parseUnits(ethAmount, 18) },
-        );
+        await approveCWETH(ethAmt);
         updateTxStep(stepIdx, "done");
         stepIdx++;
-
-        // Step: Waiting for confirmation
-        updateTxStep(stepIdx, "active");
-        await tx.wait();
-        updateTxStep(stepIdx, "done");
       } else {
-        // Step: Approving USDC
+        // Fill SELL order: taker pays cUSDC, receives cWETH
+        ethAmt = String(fillAmt);
+        usdcAmt = String(fillAmt * price);
+
+        // Step 2: Approving cUSDC
         updateTxStep(stepIdx, "active");
-        const ethToReceive = String(fillAmt);
-        const usdcAmount = String(fillAmt * price);
-        if (Number(usdcAmount) > 0) {
-          await approveUSDC(usdcAmount);
+        if (Number(usdcAmt) > 0) {
+          await approveCUSDC(usdcAmt);
         }
         updateTxStep(stepIdx, "done");
         stepIdx++;
-
-        // Step: Submitting fill
-        updateTxStep(stepIdx, "active");
-        const tx = await contract.fillOrder(
-          fillingOrder.id,
-          encrypted.handles[0],
-          encrypted.inputProof,
-          encrypted.handles[1],
-          encrypted.inputProof,
-          parseUnits(ethToReceive, 18),
-          parseUnits(usdcAmount, 6),
-        );
-        updateTxStep(stepIdx, "done");
-        stepIdx++;
-
-        // Step: Waiting for confirmation
-        updateTxStep(stepIdx, "active");
-        await tx.wait();
-        updateTxStep(stepIdx, "done");
       }
+
+      // Step 3: Initiating fill (FHE matching)
+      updateTxStep(stepIdx, "active");
+      const tx1 = await contract.initiateFill(
+        fillingOrder.id,
+        encrypted.handles[0], encrypted.inputProof,
+        encrypted.handles[1], encrypted.inputProof,
+        parseUnits(ethAmt, 18),
+        parseUnits(usdcAmt, 6),
+      );
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 4: Waiting for TX1 confirmation
+      updateTxStep(stepIdx, "active");
+      const receipt = await tx1.wait();
+      // Parse pendingFillId from FillInitiated event
+      const iface = contract.interface;
+      const fillInitiatedTopic = iface.getEvent("FillInitiated")!.topicHash;
+      const eventLog = receipt.logs.find((log: { topics: string[] }) => log.topics[0] === fillInitiatedTopic);
+      const pendingFillId = eventLog ? BigInt(eventLog.topics[2]) : 0n;
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 5: Decrypting match result
+      // In demo/mock mode the contract accepts empty proofs.
+      // Full production flow would call publicDecrypt via the gateway relayer here.
+      updateTxStep(stepIdx, "active");
+      // Brief pause to simulate decryption relay
+      await new Promise((r) => setTimeout(r, 1000));
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 6: Settling fill
+      updateTxStep(stepIdx, "active");
+      const tx2 = await contract.settleFill(
+        pendingFillId,
+        [],    // handles (empty for demo/mock mode)
+        "0x",  // cleartexts
+        "0x",  // proof
+      );
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 7: Waiting for TX2 confirmation
+      updateTxStep(stepIdx, "active");
+      await tx2.wait();
+      updateTxStep(stepIdx, "done");
 
       setFillingOrder(null);
       await loadOrders();
@@ -420,21 +449,21 @@ export default function OrderBook() {
                 {filling === fillingOrder.id ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full spinner" />
-                    Encrypting & Filling...
+                    Processing fill...
                   </span>
                 ) : fillingOrder.isBuy ? (
                   <span className="flex items-center justify-center gap-2">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
                     </svg>
-                    Fill (send ETH)
+                    Approve cWETH & Fill
                   </span>
                 ) : (
                   <span className="flex items-center justify-center gap-2">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
                     </svg>
-                    Approve USDC & Fill
+                    Approve cUSDC & Fill
                   </span>
                 )}
               </button>

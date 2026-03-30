@@ -79,10 +79,10 @@ export default function MyTrades() {
               isBuy: o.isBuy ?? o[2],
               status: Number(o.status ?? o[3]),
               createdAt: Number(o.createdAt ?? o[4]),
-              ethDeposit: formatUnits(o.ethDeposit ?? o[5] ?? 0n, 18),
-              tokenDeposit: formatUnits(o.tokenDeposit ?? o[6] ?? 0n, 6),
-              ethRemaining: formatUnits(o.ethRemaining ?? o[7] ?? 0n, 18),
-              tokenRemaining: formatUnits(o.tokenRemaining ?? o[8] ?? 0n, 6),
+              baseDeposit: formatUnits(o.baseDeposit ?? o[5] ?? 0n, 18),
+              quoteDeposit: formatUnits(o.quoteDeposit ?? o[6] ?? 0n, 6),
+              baseRemaining: formatUnits(o.baseRemaining ?? o[7] ?? 0n, 18),
+              quoteRemaining: formatUnits(o.quoteRemaining ?? o[8] ?? 0n, 6),
             });
           }
         }

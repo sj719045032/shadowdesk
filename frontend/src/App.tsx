@@ -69,7 +69,7 @@ export default function App() {
                   </svg>
                 </div>
                 <span className="text-xl font-bold tracking-tight">
-                  <span className="text-blue-400">Shadow</span><span className="text-slate-100">Desk</span>
+                  <span className="text-blue-400">Shadow</span><span className="text-slate-100">OTC</span>
                 </span>
               </NavLink>
 
@@ -77,6 +77,7 @@ export default function App() {
                 {[
                   { to: "/", label: "Order Book", end: true },
                   { to: "/create", label: "Create Order" },
+                  { to: "/vault", label: "Vault" },
                   { to: "/trades", label: "My Trades" },
                 ].map((link) => (
                   <NavLink
@@ -126,6 +127,7 @@ export default function App() {
             {[
               { to: "/", label: "Order Book", end: true },
               { to: "/create", label: "Create" },
+              { to: "/vault", label: "Vault" },
               { to: "/trades", label: "Trades" },
             ].map((link) => (
               <NavLink
@@ -159,7 +161,7 @@ export default function App() {
             <svg width="14" height="14" viewBox="0 0 32 32" fill="none">
               <path d="M16 2L4 8v8c0 7.18 5.12 13.9 12 16 6.88-2.1 12-8.82 12-16V8L16 2z" fill="#3b82f6" fillOpacity="0.2" stroke="#3b82f6" strokeWidth="1.5"/>
             </svg>
-            ShadowDesk - Confidential OTC Trading
+            ShadowOTC - Confidential OTC Trading
           </div>
           <div className="text-slate-600 text-xs">
             Powered by <span className="text-blue-400/70">Zama FHE</span> on Ethereum Sepolia

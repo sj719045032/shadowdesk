@@ -3,17 +3,22 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_paymentToken",
+        "name": "_baseToken",
         "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "_quoteToken",
+        "type": "address"
+      },
+      {
+        "internalType": "bool",
+        "name": "_skipVerification",
+        "type": "bool"
       }
     ],
     "stateMutability": "nonpayable",
     "type": "constructor"
-  },
-  {
-    "inputs": [],
-    "name": "EthTransferFailed",
-    "type": "error"
   },
   {
     "inputs": [],
@@ -32,7 +37,17 @@
   },
   {
     "inputs": [],
+    "name": "InvalidKMSSignatures",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "InvalidOrderId",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidPendingFillId",
     "type": "error"
   },
   {
@@ -48,6 +63,11 @@
   {
     "inputs": [],
     "name": "NotOwner",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotPending",
     "type": "error"
   },
   {
@@ -118,6 +138,25 @@
         "internalType": "uint256",
         "name": "orderId",
         "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "requester",
+        "type": "address"
+      }
+    ],
+    "name": "AccessRequested",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
       }
     ],
     "name": "AuditorAccessGranted",
@@ -148,6 +187,69 @@
       {
         "indexed": true,
         "internalType": "uint256",
+        "name": "pendingFillId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "reason",
+        "type": "string"
+      }
+    ],
+    "name": "FillCancelled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "pendingFillId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "taker",
+        "type": "address"
+      }
+    ],
+    "name": "FillInitiated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "pendingFillId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      }
+    ],
+    "name": "FillSettled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
         "name": "fillId",
         "type": "uint256"
       }
@@ -167,13 +269,13 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "ethRefunded",
+        "name": "baseRefunded",
         "type": "uint256"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "tokenRefunded",
+        "name": "quoteRefunded",
         "type": "uint256"
       }
     ],
@@ -210,13 +312,13 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "ethDeposit",
+        "name": "baseDeposit",
         "type": "uint256"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "tokenDeposit",
+        "name": "quoteDeposit",
         "type": "uint256"
       }
     ],
@@ -241,13 +343,13 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "ethTransferred",
+        "name": "baseTransferred",
         "type": "uint256"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "tokenTransferred",
+        "name": "quoteTransferred",
         "type": "uint256"
       }
     ],
@@ -274,11 +376,43 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "bytes32[]",
+        "name": "handlesList",
+        "type": "bytes32[]"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes",
+        "name": "abiEncodedCleartexts",
+        "type": "bytes"
+      }
+    ],
+    "name": "PublicDecryptionVerified",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "auditor",
     "outputs": [
       {
         "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "baseToken",
+    "outputs": [
+      {
+        "internalType": "contract IConfidentialToken",
         "name": "",
         "type": "address"
       }
@@ -346,7 +480,12 @@
       },
       {
         "internalType": "uint256",
-        "name": "usdcDeposit",
+        "name": "baseDeposit",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "quoteDeposit",
         "type": "uint256"
       }
     ],
@@ -358,7 +497,7 @@
         "type": "uint256"
       }
     ],
-    "stateMutability": "payable",
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -380,41 +519,17 @@
         "internalType": "uint256",
         "name": "orderId",
         "type": "uint256"
-      },
-      {
-        "internalType": "externalEuint64",
-        "name": "encTakerPrice",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes",
-        "name": "takerPriceProof",
-        "type": "bytes"
-      },
-      {
-        "internalType": "externalEuint64",
-        "name": "encTakerAmount",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes",
-        "name": "takerAmountProof",
-        "type": "bytes"
-      },
-      {
-        "internalType": "uint256",
-        "name": "takerEthAmount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "takerUsdcAmount",
-        "type": "uint256"
       }
     ],
-    "name": "fillOrder",
-    "outputs": [],
-    "stateMutability": "payable",
+    "name": "getAccessRequests",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -477,12 +592,12 @@
       },
       {
         "internalType": "uint256",
-        "name": "ethTransferred",
+        "name": "baseTransferred",
         "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "tokenTransferred",
+        "name": "quoteTransferred",
         "type": "uint256"
       }
     ],
@@ -566,6 +681,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getGrantedAddresses",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "getMyFills",
     "outputs": [
@@ -615,22 +749,22 @@
       },
       {
         "internalType": "uint256",
-        "name": "ethDeposit",
+        "name": "baseDeposit",
         "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "tokenDeposit",
+        "name": "quoteDeposit",
         "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "ethRemaining",
+        "name": "baseRemaining",
         "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "tokenRemaining",
+        "name": "quoteRemaining",
         "type": "uint256"
       }
     ],
@@ -651,6 +785,45 @@
         "internalType": "uint256[]",
         "name": "",
         "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "getPendingFill",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "taker",
+        "type": "address"
+      },
+      {
+        "internalType": "enum ConfidentialOTC.FillStatus",
+        "name": "status",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "takerBaseAmount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "takerQuoteAmount",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -739,6 +912,55 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "externalEuint64",
+        "name": "encTakerPrice",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "takerPriceProof",
+        "type": "bytes"
+      },
+      {
+        "internalType": "externalEuint64",
+        "name": "encTakerAmount",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes",
+        "name": "takerAmountProof",
+        "type": "bytes"
+      },
+      {
+        "internalType": "uint256",
+        "name": "takerBaseAmount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "takerQuoteAmount",
+        "type": "uint256"
+      }
+    ],
+    "name": "initiateFill",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "pendingFillId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "orderCount",
     "outputs": [
@@ -766,15 +988,41 @@
   },
   {
     "inputs": [],
-    "name": "paymentToken",
+    "name": "pendingFillCount",
     "outputs": [
       {
-        "internalType": "contract IERC20",
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "quoteToken",
+    "outputs": [
+      {
+        "internalType": "contract IConfidentialToken",
         "name": "",
         "type": "address"
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "orderId",
+        "type": "uint256"
+      }
+    ],
+    "name": "requestAccess",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -788,6 +1036,57 @@
     "name": "setAuditor",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "pendingFillId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "priceMatched",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint64",
+        "name": "fillAmount",
+        "type": "uint64"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "handlesList",
+        "type": "bytes32[]"
+      },
+      {
+        "internalType": "bytes",
+        "name": "cleartexts",
+        "type": "bytes"
+      },
+      {
+        "internalType": "bytes",
+        "name": "decryptionProof",
+        "type": "bytes"
+      }
+    ],
+    "name": "settleFill",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "skipVerification",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -815,9 +1114,5 @@
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
-  },
-  {
-    "stateMutability": "payable",
-    "type": "receive"
   }
 ]

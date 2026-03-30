@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getContract, CONTRACT_ADDRESS, approveUSDC, parseUnits, formatUnits, fetchOrderFillIds, fetchFillDetail, type FillData } from "../lib/contract";
+import { getContract, CONTRACT_ADDRESS, approveCUSDC, approveCWETH, parseUnits, formatUnits, fetchOrderFillIds, fetchFillDetail, requestAccess, getAccessRequests, getGrantedAddresses, type FillData } from "../lib/contract";
 import { useWallet } from "../App";
 import { encryptInputs, decryptValues, unscaleFromFHE } from "../lib/fhevm";
 import TransactionModal, { type Step } from "../components/TransactionModal";
@@ -13,8 +13,8 @@ export default function OrderDetail() {
 
   const [order, setOrder] = useState<{
     maker: string; tokenPair: string; isBuy: boolean; status: number;
-    createdAt: number; ethDeposit: string; tokenDeposit: string;
-    ethRemaining: string; tokenRemaining: string;
+    createdAt: number; baseDeposit: string; quoteDeposit: string;
+    baseRemaining: string; quoteRemaining: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [decryptedPrice, setDecryptedPrice] = useState<number | null>(null);
@@ -27,6 +27,12 @@ export default function OrderDetail() {
   const [copiedLink, setCopiedLink] = useState(false);
   const [fills, setFills] = useState<FillData[]>([]);
   const [fillsLoading, setFillsLoading] = useState(true);
+
+  // Access management state
+  const [accessRequests, setAccessRequests] = useState<string[]>([]);
+  const [grantedAddresses, setGrantedAddresses] = useState<string[]>([]);
+  const [accessLoading, setAccessLoading] = useState(true);
+  const [accessRequested, setAccessRequested] = useState(false);
 
   // Transaction modal state
   const [txModalOpen, setTxModalOpen] = useState(false);
@@ -50,7 +56,34 @@ export default function OrderDetail() {
     setTxSteps((prev) => prev.map((s) => s.status === "active" ? { ...s, status: "error" } : s));
   }
 
-  useEffect(() => { loadOrder(); loadFills(); }, [orderId]);
+  useEffect(() => { loadOrder(); loadFills(); loadAccessData(); }, [orderId]);
+
+  async function loadAccessData() {
+    try {
+      setAccessLoading(true);
+      const [requests, granted] = await Promise.all([
+        getAccessRequests(orderId),
+        getGrantedAddresses(orderId),
+      ]);
+      setAccessRequests(requests);
+      setGrantedAddresses(granted);
+      // Check if current user already requested access
+      if (account) {
+        const hasRequested = requests.some(
+          (addr) => addr.toLowerCase() === account.toLowerCase()
+        );
+        const hasGranted = granted.some(
+          (addr) => addr.toLowerCase() === account.toLowerCase()
+        );
+        setAccessRequested(hasRequested || hasGranted);
+      }
+    } catch {
+      setAccessRequests([]);
+      setGrantedAddresses([]);
+    } finally {
+      setAccessLoading(false);
+    }
+  }
 
   async function loadOrder() {
     try {
@@ -60,10 +93,10 @@ export default function OrderDetail() {
       setOrder({
         maker: o[0], tokenPair: o[1], isBuy: o[2], status: Number(o[3]),
         createdAt: Number(o[4]),
-        ethDeposit: formatUnits(o[5] ?? 0n, 18),
-        tokenDeposit: formatUnits(o[6] ?? 0n, 6),
-        ethRemaining: formatUnits(o[7] ?? 0n, 18),
-        tokenRemaining: formatUnits(o[8] ?? 0n, 6),
+        baseDeposit: formatUnits(o[5] ?? 0n, 18),
+        quoteDeposit: formatUnits(o[6] ?? 0n, 6),
+        baseRemaining: formatUnits(o[7] ?? 0n, 18),
+        quoteRemaining: formatUnits(o[8] ?? 0n, 6),
       });
     } catch {
       setOrder(null);
@@ -120,7 +153,7 @@ export default function OrderDetail() {
       setDecryptedPrice(p);
       setDecryptedAmount(a);
       // Default fill to remaining, not original
-      const remaining = order!.isBuy ? Number(order!.tokenRemaining) / p : Number(order!.ethRemaining);
+      const remaining = order!.isBuy ? Number(order!.quoteRemaining) / p : Number(order!.baseRemaining);
       setFillAmount(String(remaining > 0 ? remaining : a));
       updateTxStep(2, "done");
     } catch {
@@ -141,14 +174,21 @@ export default function OrderDetail() {
     const steps: Step[] = isSellOrder
       ? [
           { label: "Encrypting bid", status: "pending" },
-          { label: "Approving USDC", status: "pending" },
-          { label: "Submitting fill", status: "pending" },
-          { label: "Waiting for confirmation", status: "pending" },
+          { label: "Approving cUSDC", status: "pending" },
+          { label: "Initiating fill (FHE matching)", status: "pending" },
+          { label: "Waiting for TX1 confirmation", status: "pending" },
+          { label: "Decrypting match result", status: "pending" },
+          { label: "Settling fill", status: "pending" },
+          { label: "Waiting for TX2 confirmation", status: "pending" },
         ]
       : [
           { label: "Encrypting bid", status: "pending" },
-          { label: "Submitting fill (sending ETH)", status: "pending" },
-          { label: "Waiting for confirmation", status: "pending" },
+          { label: "Approving cWETH", status: "pending" },
+          { label: "Initiating fill (FHE matching)", status: "pending" },
+          { label: "Waiting for TX1 confirmation", status: "pending" },
+          { label: "Decrypting match result", status: "pending" },
+          { label: "Settling fill", status: "pending" },
+          { label: "Waiting for TX2 confirmation", status: "pending" },
         ];
     openTxModal("Filling Order", steps);
 
@@ -156,7 +196,7 @@ export default function OrderDetail() {
       setFilling(true); setFillError("");
       let stepIdx = 0;
 
-      // Step: Encrypting
+      // Step 1: Encrypting bid
       updateTxStep(stepIdx, "active");
       const encrypted = await encryptInputs(account, price, fillAmt);
       updateTxStep(stepIdx, "done");
@@ -164,39 +204,77 @@ export default function OrderDetail() {
 
       const contract = await getContract(true);
 
+      let ethAmt: string;
+      let usdcAmt: string;
+
       if (order!.isBuy) {
-        // Step: Submitting fill (sending ETH)
+        ethAmt = String(fillAmt);
+        usdcAmt = String(fillAmt * price);
+
+        // Step 2: Approving cWETH
         updateTxStep(stepIdx, "active");
-        const ethAmt = String(fillAmt);
-        const usdcToReceive = String(fillAmt * price);
-        const tx = await contract.fillOrder(orderId, encrypted.handles[0], encrypted.inputProof, encrypted.handles[1], encrypted.inputProof, parseUnits(ethAmt, 18), parseUnits(usdcToReceive, 6), { value: parseUnits(ethAmt, 18) });
+        await approveCWETH(ethAmt);
         updateTxStep(stepIdx, "done");
         stepIdx++;
-
-        // Step: Waiting for confirmation
-        updateTxStep(stepIdx, "active");
-        await tx.wait();
-        updateTxStep(stepIdx, "done");
       } else {
-        // Step: Approving USDC
+        ethAmt = String(fillAmt);
+        usdcAmt = String(fillAmt * price);
+
+        // Step 2: Approving cUSDC
         updateTxStep(stepIdx, "active");
-        const ethToReceive = String(fillAmt);
-        const usdcAmt = String(fillAmt * price);
-        if (Number(usdcAmt) > 0) await approveUSDC(usdcAmt);
+        if (Number(usdcAmt) > 0) await approveCUSDC(usdcAmt);
         updateTxStep(stepIdx, "done");
         stepIdx++;
-
-        // Step: Submitting fill
-        updateTxStep(stepIdx, "active");
-        const tx = await contract.fillOrder(orderId, encrypted.handles[0], encrypted.inputProof, encrypted.handles[1], encrypted.inputProof, parseUnits(ethToReceive, 18), parseUnits(usdcAmt, 6));
-        updateTxStep(stepIdx, "done");
-        stepIdx++;
-
-        // Step: Waiting for confirmation
-        updateTxStep(stepIdx, "active");
-        await tx.wait();
-        updateTxStep(stepIdx, "done");
       }
+
+      // Step 3: Initiating fill (FHE matching)
+      updateTxStep(stepIdx, "active");
+      const tx1 = await contract.initiateFill(
+        orderId,
+        encrypted.handles[0], encrypted.inputProof,
+        encrypted.handles[1], encrypted.inputProof,
+        parseUnits(ethAmt, 18),
+        parseUnits(usdcAmt, 6),
+      );
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 4: Waiting for TX1 confirmation
+      updateTxStep(stepIdx, "active");
+      const receipt = await tx1.wait();
+      // Parse pendingFillId from FillInitiated event
+      const iface = contract.interface;
+      const fillInitiatedTopic = iface.getEvent("FillInitiated")!.topicHash;
+      const eventLog = receipt.logs.find((log: { topics: string[] }) => log.topics[0] === fillInitiatedTopic);
+      const pendingFillId = eventLog ? BigInt(eventLog.topics[2]) : 0n;
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 5: Decrypting match result
+      // In demo/mock mode the contract accepts empty proofs.
+      // Full production flow would call publicDecrypt via the gateway relayer here.
+      updateTxStep(stepIdx, "active");
+      // Brief pause to simulate decryption relay
+      await new Promise((r) => setTimeout(r, 1000));
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 6: Settling fill
+      updateTxStep(stepIdx, "active");
+      const tx2 = await contract.settleFill(
+        pendingFillId,
+        [],    // handles (empty for demo/mock mode)
+        "0x",  // cleartexts
+        "0x",  // proof
+      );
+      updateTxStep(stepIdx, "done");
+      stepIdx++;
+
+      // Step 7: Waiting for TX2 confirmation
+      updateTxStep(stepIdx, "active");
+      await tx2.wait();
+      updateTxStep(stepIdx, "done");
+
       await loadOrder();
       await loadFills();
       // Reset decrypt state so remaining recalculates on next decrypt
@@ -231,6 +309,47 @@ export default function OrderDetail() {
       updateTxStep(1, "active");
       await tx.wait();
       updateTxStep(1, "done");
+    } catch (err) {
+      failTxModal((err as Error).message?.slice(0, 100) || "Transaction failed");
+    }
+  }
+
+  async function handleRequestAccess() {
+    if (!account) { await connect(); return; }
+    const steps: Step[] = [
+      { label: "Submitting access request", status: "pending" },
+      { label: "Waiting for confirmation", status: "pending" },
+    ];
+    openTxModal("Requesting Access", steps);
+    try {
+      updateTxStep(0, "active");
+      await requestAccess(orderId);
+      updateTxStep(0, "done");
+      updateTxStep(1, "active");
+      // requestAccess already waits for tx
+      updateTxStep(1, "done");
+      setAccessRequested(true);
+      await loadAccessData();
+    } catch (err) {
+      failTxModal((err as Error).message?.slice(0, 100) || "Transaction failed");
+    }
+  }
+
+  async function handleApproveAccess(addr: string) {
+    const steps: Step[] = [
+      { label: "Submitting grant access", status: "pending" },
+      { label: "Waiting for confirmation", status: "pending" },
+    ];
+    openTxModal("Granting Access", steps);
+    try {
+      updateTxStep(0, "active");
+      const contract = await getContract(true);
+      const tx = await contract.grantAccess(orderId, addr);
+      updateTxStep(0, "done");
+      updateTxStep(1, "active");
+      await tx.wait();
+      updateTxStep(1, "done");
+      await loadAccessData();
     } catch (err) {
       failTxModal((err as Error).message?.slice(0, 100) || "Transaction failed");
     }
@@ -325,6 +444,93 @@ export default function OrderDetail() {
         </div>
       </div>
 
+      {/* Access Management */}
+      {order.status === 0 && (
+        <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-6">
+          <div className="p-6">
+            <h3 className="text-sm font-semibold text-slate-300 mb-4">Access Management</h3>
+
+            {accessLoading ? (
+              <div className="flex items-center justify-center py-6">
+                <div className="w-5 h-5 border-2 border-purple-500/30 border-t-purple-500 rounded-full spinner" />
+              </div>
+            ) : isMaker ? (
+              /* Maker view: show pending requests and granted addresses */
+              <div className="space-y-5">
+                {/* Pending Requests */}
+                <div>
+                  <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">
+                    Pending Requests ({accessRequests.filter(
+                      (addr) => !grantedAddresses.some((g) => g.toLowerCase() === addr.toLowerCase())
+                    ).length})
+                  </div>
+                  {accessRequests.filter(
+                    (addr) => !grantedAddresses.some((g) => g.toLowerCase() === addr.toLowerCase())
+                  ).length === 0 ? (
+                    <div className="text-sm text-slate-500 py-2">No pending requests</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {accessRequests
+                        .filter((addr) => !grantedAddresses.some((g) => g.toLowerCase() === addr.toLowerCase()))
+                        .map((addr) => (
+                          <div key={addr} className="flex items-center justify-between bg-[#0d1117] rounded-xl px-4 py-3 border border-[#1e293b]/50">
+                            <span className="text-sm text-slate-300 font-mono">
+                              {addr.slice(0, 6)}...{addr.slice(-4)}
+                            </span>
+                            <button
+                              onClick={() => handleApproveAccess(addr)}
+                              className="bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 px-4 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer"
+                            >
+                              Approve
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Granted Addresses */}
+                <div>
+                  <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">
+                    Granted ({grantedAddresses.length})
+                  </div>
+                  {grantedAddresses.length === 0 ? (
+                    <div className="text-sm text-slate-500 py-2">No granted addresses</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {grantedAddresses.map((addr) => (
+                        <div key={addr} className="flex items-center justify-between bg-[#0d1117] rounded-xl px-4 py-3 border border-[#1e293b]/50">
+                          <span className="text-sm text-slate-300 font-mono">
+                            {addr.slice(0, 6)}...{addr.slice(-4)}
+                          </span>
+                          <span className="text-emerald-400 text-sm">{"\u2705"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* Taker view: request access button or requested state */
+              <div>
+                {accessRequested ? (
+                  <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 text-sm text-emerald-400">
+                    {"\u2713"} Access Requested
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleRequestAccess}
+                    className="w-full bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 py-3 rounded-xl text-sm font-medium transition cursor-pointer"
+                  >
+                    {"\uD83D\uDD13"} Request Access
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Fill History */}
       <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-6">
         <div className="p-6">
@@ -400,7 +606,7 @@ export default function OrderDetail() {
                 className={`w-full py-3.5 rounded-xl font-semibold transition cursor-pointer disabled:opacity-50 ${
                   order.isBuy ? "bg-gradient-to-r from-red-600 to-red-500 text-white" : "bg-gradient-to-r from-emerald-600 to-emerald-500 text-white"
                 }`}>
-                {filling ? "Encrypting & Filling..." : order.isBuy ? "Fill (send ETH)" : "Approve USDC & Fill"}
+                {filling ? "Processing fill..." : order.isBuy ? "Approve cWETH & Fill" : "Approve cUSDC & Fill"}
               </button>
             </div>
           </div>
