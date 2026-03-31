@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { getContract, approveCUSDC, approveCWETH, getUSDCBalance, getETHBalance, parseUnits, getCWETH, getCUSDC, CWETH_ADDRESS, CUSDC_ADDRESS } from "../lib/contract";
+import { needsOperatorSetup, ensureOperatorSet, getUSDCBalance, getETHBalance, parseUnits, cwethRead, cusdcRead, otcWrite, waitTx, CWETH_ADDRESS, CUSDC_ADDRESS, ZERO_FHE_HANDLE } from "../lib/contract";
 import { Link } from "react-router-dom";
 import { encryptInputs, decryptValues } from "../lib/fhevm";
 import { useWallet } from "../App";
@@ -46,42 +46,30 @@ export default function CreateOrder() {
 
   async function decryptBalances() {
     if (!account || !CWETH_ADDRESS || !CUSDC_ADDRESS) return;
-    const steps: Step[] = [
-      { label: "Reading encrypted balances", status: "pending" },
-      { label: "Signing decrypt request", status: "pending" },
-      { label: "Decrypting via KMS", status: "pending" },
-    ];
-    setTxSteps(steps);
-    setTxModalTitle("Decrypting Balances");
-    setTxModalOpen(true);
-    setTxError("");
     try {
       setDecryptingBalances(true);
 
-      setTxSteps(s => s.map((x, i) => i === 0 ? { ...x, status: "active" } : x));
-      const cweth = await getCWETH();
-      const cusdc = await getCUSDC();
-      const encCweth = await cweth.balanceOf(account);
-      const encCusdc = await cusdc.balanceOf(account);
-      setTxSteps(s => s.map((x, i) => i === 0 ? { ...x, status: "done" } : i === 1 ? { ...x, status: "active" } : x));
+      const [encCweth, encCusdc] = await Promise.all([
+        cwethRead<string>("confidentialBalanceOf", [account]).then(String),
+        cusdcRead<string>("confidentialBalanceOf", [account]).then(String),
+      ]);
+      const handles: { handle: string; contractAddress: string }[] = [];
+      if (encCweth && encCweth !== ZERO_FHE_HANDLE) handles.push({ handle: encCweth, contractAddress: CWETH_ADDRESS });
+      if (encCusdc && encCusdc !== ZERO_FHE_HANDLE) handles.push({ handle: encCusdc, contractAddress: CUSDC_ADDRESS });
 
-      const results = await decryptValues(
-        [
-          { handle: encCweth.toString(), contractAddress: CWETH_ADDRESS },
-          { handle: encCusdc.toString(), contractAddress: CUSDC_ADDRESS },
-        ],
-        account,
-      );
-      setTxSteps(s => s.map((x, i) => i === 1 ? { ...x, status: "done" } : i === 2 ? { ...x, status: "active" } : x));
+      if (handles.length === 0) {
+        setCwethBalance("0");
+        setCusdcBalance("0");
+        return;
+      }
 
-      const values = [...results.values()];
-      setCwethBalance(String(Number(values[0] || 0n) / 1e18));
-      setCusdcBalance(String(Number(values[1] || 0n) / 1e6));
-      setTxSteps(s => s.map(x => ({ ...x, status: "done" })));
+      const results = await decryptValues(handles, account);
+      const cwethVal = (encCweth && encCweth !== ZERO_FHE_HANDLE) ? results.get(encCweth) : 0n;
+      const cusdcVal = (encCusdc && encCusdc !== ZERO_FHE_HANDLE) ? results.get(encCusdc) : 0n;
+      setCwethBalance(String(Number(cwethVal || 0n) / 1e6));
+      setCusdcBalance(String(Number(cusdcVal || 0n) / 1e6));
     } catch (err) {
       console.error("Decrypt balances failed:", err);
-      setTxError("Decrypt failed");
-      setTxSteps(s => s.map(x => x.status === "active" ? { ...x, status: "error" } : x));
     } finally {
       setDecryptingBalances(false);
     }
@@ -89,20 +77,10 @@ export default function CreateOrder() {
 
   const currentStep = computeStep(pair, price, amount, submitting);
 
-  function makeSteps(isBuy: boolean): Step[] {
-    if (isBuy) {
-      return [
-        { label: "Encrypting price & amount", status: "pending" },
-        { label: "Approving cUSDC", status: "pending" },
-        { label: "Submitting transaction", status: "pending" },
-        { label: "Waiting for confirmation", status: "pending" },
-      ];
-    }
+  function makeSteps(): Step[] {
     return [
-      { label: "Encrypting price & amount", status: "pending" },
-      { label: "Approving cWETH", status: "pending" },
-      { label: "Submitting transaction", status: "pending" },
-      { label: "Waiting for confirmation", status: "pending" },
+      { label: "Encrypting", status: "pending" },
+      { label: "Submitting order", status: "pending" },
     ];
   }
 
@@ -143,76 +121,55 @@ export default function CreateOrder() {
     }
 
     const isBuy = side === "buy";
-    const steps = makeSteps(isBuy);
+    const needsAuth = await needsOperatorSetup();
+
+    if (needsAuth) {
+      setTxSteps([{ label: "Setting up OTC authorization", status: "active" }]);
+      setTxModalTitle("Authorization");
+      setTxModalOpen(true);
+      try {
+        await ensureOperatorSet();
+        setTxSteps([{ label: "Setting up OTC authorization", status: "done" }]);
+        await new Promise(r => setTimeout(r, 400));
+        setTxModalOpen(false);
+      } catch (err) {
+        setTxError((err as Error).message?.slice(0, 100) || "Authorization failed");
+        setTxSteps([{ label: "Setting up OTC authorization", status: "error" }]);
+        return;
+      }
+    }
+
+    const steps = makeSteps();
     setTxSteps(steps);
     setTxModalTitle(isBuy ? "Creating BUY Order" : "Creating SELL Order");
+    setTxError("");
     setTxModalOpen(true);
 
     try {
       setSubmitting(true);
       let stepIdx = 0;
 
-      // Step: Encrypting
+      // Step: Encrypting — yield to browser so modal animation starts before WASM blocks
       updateStep(stepIdx, "active");
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 100)));
       const encrypted = await encryptInputs(account, priceNum, amountNum);
       updateStep(stepIdx, "done");
       stepIdx++;
 
-      const contract = await getContract(true);
-
-      if (isBuy) {
-        // Step: Approving cUSDC
-        updateStep(stepIdx, "active");
-        await approveCUSDC(deposit);
-        updateStep(stepIdx, "done");
-        stepIdx++;
-
-        // Step: Submitting transaction
-        updateStep(stepIdx, "active");
-        const tx = await contract.createOrder(
-          encrypted.handles[0],
-          encrypted.inputProof,
-          encrypted.handles[1],
-          encrypted.inputProof,
-          true,
-          pair,
-          0,
-          parseUnits(deposit, 6),
-        );
-        updateStep(stepIdx, "done");
-        stepIdx++;
-
-        // Step: Waiting for confirmation
-        updateStep(stepIdx, "active");
-        await tx.wait();
-        updateStep(stepIdx, "done");
-      } else {
-        // Step: Approving cWETH
-        updateStep(stepIdx, "active");
-        await approveCWETH(deposit);
-        updateStep(stepIdx, "done");
-        stepIdx++;
-
-        // Step: Submitting transaction
-        updateStep(stepIdx, "active");
-        const tx = await contract.createOrder(
-          encrypted.handles[0],
-          encrypted.inputProof,
-          encrypted.handles[1],
-          encrypted.inputProof,
-          false,
-          pair,
-          parseUnits(deposit, 18),
-          0,
-        );
-        updateStep(stepIdx, "done");
-        stepIdx++;
-
-        // Step: Waiting for confirmation
-        updateStep(stepIdx, "active");
-        await tx.wait();
-        updateStep(stepIdx, "done");
-      }
+      // Step: Submitting order + waiting for confirmation
+      updateStep(stepIdx, "active");
+      const hash = await otcWrite("createOrder", [
+        encrypted.handles[0],
+        encrypted.inputProof,
+        encrypted.handles[1],
+        encrypted.inputProof,
+        isBuy,
+        pair,
+        isBuy ? 0 : parseUnits(deposit, 18),
+        isBuy ? parseUnits(deposit, 6) : 0,
+      ]);
+      await waitTx(hash);
+      updateStep(stepIdx, "done");
 
       // Auto-navigate after short delay
       setTimeout(() => navigate("/"), 1200);
@@ -423,7 +380,7 @@ export default function CreateOrder() {
                 {cwethBalance === null && (
                   <button onClick={decryptBalances} disabled={decryptingBalances}
                     className="text-[10px] px-2 py-0.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 rounded transition cursor-pointer disabled:opacity-50">
-                    {decryptingBalances ? "..." : "Decrypt"}
+                    {decryptingBalances ? "Decrypting..." : "Decrypt"}
                   </button>
                 )}
               </div>

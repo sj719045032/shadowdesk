@@ -113,6 +113,7 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         FillStatus status;
         uint256 takerBaseAmount;
         uint256 takerQuoteAmount;
+        euint64 prevRemainingAmount;
     }
 
     // =========================================================================
@@ -176,7 +177,6 @@ contract ConfidentialOTC is ZamaEthereumConfig {
     /// @notice Emitted when a new order is created with escrow
     event OrderCreated(
         uint256 indexed orderId,
-        address indexed maker,
         string tokenPair,
         bool isBuy,
         uint256 baseDeposit,
@@ -194,12 +194,6 @@ contract ConfidentialOTC is ZamaEthereumConfig {
     /// @notice Emitted when an order is cancelled and assets refunded
     event OrderCancelled(uint256 indexed orderId, uint256 baseRefunded, uint256 quoteRefunded);
 
-    /// @notice Emitted when a maker grants view access to a third party
-    event AccessGranted(uint256 indexed orderId, address indexed viewer);
-
-    /// @notice Emitted when a taker requests access to view encrypted order terms
-    event AccessRequested(uint256 indexed orderId, address indexed requester);
-
     /// @notice Emitted when the auditor address is updated
     event AuditorUpdated(address indexed oldAuditor, address indexed newAuditor);
 
@@ -210,7 +204,7 @@ contract ConfidentialOTC is ZamaEthereumConfig {
     event FillVolumePublished(uint256 indexed fillId);
 
     /// @notice Emitted when a fill is initiated and awaiting settlement
-    event FillInitiated(uint256 indexed pendingFillId, uint256 indexed orderId, address taker);
+    event FillInitiated(uint256 indexed pendingFillId, uint256 indexed orderId);
 
     /// @notice Emitted when a pending fill is settled successfully
     event FillSettled(uint256 indexed pendingFillId, uint256 indexed orderId);
@@ -362,7 +356,7 @@ contract ConfidentialOTC is ZamaEthereumConfig {
             })
         );
 
-        emit OrderCreated(orderId, msg.sender, tokenPair, isBuy, baseDep, quoteDep);
+        emit OrderCreated(orderId, tokenPair, isBuy, baseDep, quoteDep);
     }
 
     /// @notice Phase 1: Initiate a fill with FHE computation and mark results for public decryption
@@ -417,6 +411,16 @@ contract ConfidentialOTC is ZamaEthereumConfig {
             if (takerQuoteAmount > order.quoteRemaining) revert InsufficientRemaining();
         }
 
+        // Escrow taker's tokens into this contract before FHE matching.
+        // If taker's balance is uninitialized, this reverts (ERC7984ZeroBalance).
+        if (!order.isBuy) {
+            // SELL order: taker pays cUSDC
+            quoteToken.depositFrom(msg.sender, address(this), takerQuoteAmount);
+        } else {
+            // BUY order: taker pays cWETH
+            baseToken.depositFrom(msg.sender, address(this), takerBaseAmount);
+        }
+
         // Convert external encrypted inputs to internal ciphertexts
         euint64 takerPrice = FHE.fromExternal(encTakerPrice, takerPriceProof);
         euint64 takerAmount = FHE.fromExternal(encTakerAmount, takerAmountProof);
@@ -452,6 +456,9 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         FHE.makePubliclyDecryptable(result.effectiveFill);
 
         // Save the pending fill (no transfers yet)
+        // Store previous remaining so it can be restored if fill is cancelled
+        euint64 prevRemaining = order.remainingAmount;
+
         pendingFillId = _pendingFills.length;
         _pendingFills.push(
             PendingFill({
@@ -464,7 +471,8 @@ contract ConfidentialOTC is ZamaEthereumConfig {
                 encTakerAddr: result.encTakerAddr,
                 status: FillStatus.Pending,
                 takerBaseAmount: takerBaseAmount,
-                takerQuoteAmount: takerQuoteAmount
+                takerQuoteAmount: takerQuoteAmount,
+                prevRemainingAmount: prevRemaining
             })
         );
 
@@ -485,7 +493,7 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         FHE.allow(result.priorityScore, order.maker);
         FHE.allow(result.priorityScore, msg.sender);
 
-        emit FillInitiated(pendingFillId, orderId, msg.sender);
+        emit FillInitiated(pendingFillId, orderId);
     }
 
     /// @notice Phase 2: Settle a pending fill after public decryption results are available
@@ -534,6 +542,21 @@ contract ConfidentialOTC is ZamaEthereumConfig {
             emit FillSettled(pendingFillId, pf.orderId);
         } else {
             pf.status = FillStatus.Cancelled;
+            // Restore the order's encrypted remaining amount since fill was cancelled
+            Order storage order = _orders[pf.orderId];
+            FHE.allowThis(pf.prevRemainingAmount);
+            FHE.allow(pf.prevRemainingAmount, order.maker);
+            order.remainingAmount = pf.prevRemainingAmount;
+            // Refund taker's escrowed tokens
+            if (!order.isBuy) {
+                if (pf.takerQuoteAmount > 0) {
+                    quoteToken.depositTransfer(pf.taker, pf.takerQuoteAmount);
+                }
+            } else {
+                if (pf.takerBaseAmount > 0) {
+                    baseToken.depositTransfer(pf.taker, pf.takerBaseAmount);
+                }
+            }
             emit FillCancelled(pendingFillId, priceMatched ? "Zero fill" : "Price mismatch");
         }
     }
@@ -675,36 +698,32 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         emit OrderFilled(pf.orderId, fillId, baseInFill, quoteInFill);
         emit FillVolumePublished(fillId);
 
-        // Execute two-sided confidential token transfers
-        // Encrypted amounts (effectiveFill, settlementTotal) use confidentialTransferFrom
-        // so the transfer amounts remain encrypted on-chain.
-        // Plaintext deposited amounts use depositFrom (ERC7984 operator pattern).
-        //
-        // NOTE: ERC7984's confidentialTransferFrom requires the token contract to have
-        // FHE ACL access to the encrypted amount handle. We grant access to the target
-        // token contract before calling confidentialTransferFrom.
+        // Execute two-sided token transfers.
+        // Taker's tokens were escrowed into this contract during initiateFill.
+        // Maker's tokens were escrowed during createOrder.
+        // Now OTC distributes both sides:
+        //   - Maker's deposit → taker (encrypted via confidentialTransferFrom, privacy preserved)
+        //   - Taker's escrow → maker (plaintext via depositTransfer)
         if (!order.isBuy) {
-            // SELL order: taker pays cUSDC to maker, gets cWETH from order
-            // Taker's cUSDC payment -> maker (plaintext deposit via depositFrom)
-            if (pf.takerQuoteAmount > 0) {
-                bool success = quoteToken.depositFrom(pf.taker, order.maker, pf.takerQuoteAmount);
-                if (!success) revert TransferFailed();
-            }
-            // Grant cWETH contract ACL access to the effectiveFill handle
+            // SELL order: maker's cWETH → taker, taker's cUSDC → maker
             FHE.allow(pf.effectiveFill, address(baseToken));
-            // Maker's escrowed cWETH -> taker (encrypted effectiveFill via ERC7984 confidentialTransferFrom)
             baseToken.confidentialTransferFrom(address(this), pf.taker, pf.effectiveFill);
-        } else {
-            // BUY order: taker pays cWETH to maker, gets cUSDC from order
-            // Taker's cWETH payment -> maker (plaintext deposit via depositFrom)
-            if (pf.takerBaseAmount > 0) {
-                bool success = baseToken.depositFrom(pf.taker, order.maker, pf.takerBaseAmount);
+            if (pf.takerQuoteAmount > 0) {
+                bool success = quoteToken.depositTransfer(order.maker, pf.takerQuoteAmount);
                 if (!success) revert TransferFailed();
             }
-            // Grant cUSDC contract ACL access to the settlementTotal handle
-            FHE.allow(pf.settlementTotal, address(quoteToken));
-            // Maker's escrowed cUSDC -> taker (encrypted settlementTotal via ERC7984 confidentialTransferFrom)
-            quoteToken.confidentialTransferFrom(address(this), pf.taker, pf.settlementTotal);
+        } else {
+            // BUY order: maker's cUSDC → taker, taker's cWETH → maker
+            // settlementTotal is price(6-dec) × amount(6-dec) = 12-dec.
+            // cUSDC encrypted balance is 6-dec. Scale down by 1e6.
+            euint64 scaledTotal = FHE.div(pf.settlementTotal, uint64(1e6));
+            FHE.allowThis(scaledTotal);
+            FHE.allow(scaledTotal, address(quoteToken));
+            quoteToken.confidentialTransferFrom(address(this), pf.taker, scaledTotal);
+            if (pf.takerBaseAmount > 0) {
+                bool success = baseToken.depositTransfer(order.maker, pf.takerBaseAmount);
+                if (!success) revert TransferFailed();
+            }
         }
     }
 
@@ -763,7 +782,6 @@ contract ConfidentialOTC is ZamaEthereumConfig {
             _grantedAddresses[orderId].push(viewer);
         }
 
-        emit AccessGranted(orderId, viewer);
     }
 
     /// @notice Taker requests access to view encrypted order terms
@@ -776,7 +794,6 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         require(!_hasRequested[orderId][msg.sender], "Already requested");
         _hasRequested[orderId][msg.sender] = true;
         _accessRequests[orderId].push(msg.sender);
-        emit AccessRequested(orderId, msg.sender);
     }
 
     /// @notice Get list of addresses that requested access to an order
@@ -784,15 +801,29 @@ contract ConfidentialOTC is ZamaEthereumConfig {
     /// @return List of requester addresses
     function getAccessRequests(uint256 orderId) external view returns (address[] memory) {
         if (orderId >= _orders.length) revert InvalidOrderId();
+        require(_orders[orderId].maker == msg.sender, "Only maker");
         return _accessRequests[orderId];
     }
 
-    /// @notice Get list of addresses that have been granted access
+    /// @notice Get list of addresses that have been granted access (maker only)
     /// @param orderId The order to query
     /// @return List of granted addresses
     function getGrantedAddresses(uint256 orderId) external view returns (address[] memory) {
         if (orderId >= _orders.length) revert InvalidOrderId();
+        require(_orders[orderId].maker == msg.sender, "Only maker");
         return _grantedAddresses[orderId];
+    }
+
+    /// @notice Get the caller's access status for an order
+    /// @param orderId The order to query
+    /// @return hasRequested Whether caller has requested access
+    /// @return hasAccess Whether caller has been granted access
+    /// @return maker Whether caller is the maker of the order
+    function getAccessStatus(uint256 orderId) external view returns (bool hasRequested, bool hasAccess, bool maker) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        hasRequested = _hasRequested[orderId][msg.sender];
+        hasAccess = _hasAccess[orderId][msg.sender];
+        maker = _orders[orderId].maker == msg.sender;
     }
 
     /// @notice Set the compliance auditor address (owner only)
@@ -854,12 +885,17 @@ contract ConfidentialOTC is ZamaEthereumConfig {
     //                          VIEW FUNCTIONS
     // =========================================================================
 
-    /// @notice Get public (non-encrypted) fields of an order
+    /// @notice Check if caller is the maker of an order
+    function isMaker(uint256 orderId) external view returns (bool) {
+        if (orderId >= _orders.length) revert InvalidOrderId();
+        return _orders[orderId].maker == msg.sender;
+    }
+
+    /// @notice Get public (non-encrypted) fields of an order (maker address hidden)
     function getOrder(uint256 orderId)
         external
         view
         returns (
-            address maker,
             string memory tokenPair,
             bool isBuy,
             Status status,
@@ -873,7 +909,6 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         if (orderId >= _orders.length) revert InvalidOrderId();
         Order storage order = _orders[orderId];
         return (
-            order.maker,
             order.tokenPair,
             order.isBuy,
             order.status,
@@ -960,10 +995,9 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         return _totalVolume;
     }
 
-    /// @notice Get public fields of a pending fill
+    /// @notice Get public fields of a pending fill (taker address hidden)
     /// @param id The pending fill ID
     /// @return orderId The associated order ID
-    /// @return taker The taker address
     /// @return status The fill status (Pending, Settled, or Cancelled)
     /// @return takerBaseAmount The plaintext base amount
     /// @return takerQuoteAmount The plaintext quote amount
@@ -972,7 +1006,6 @@ contract ConfidentialOTC is ZamaEthereumConfig {
         view
         returns (
             uint256 orderId,
-            address taker,
             FillStatus status,
             uint256 takerBaseAmount,
             uint256 takerQuoteAmount
@@ -980,6 +1013,21 @@ contract ConfidentialOTC is ZamaEthereumConfig {
     {
         if (id >= _pendingFills.length) revert InvalidPendingFillId();
         PendingFill storage pf = _pendingFills[id];
-        return (pf.orderId, pf.taker, pf.status, pf.takerBaseAmount, pf.takerQuoteAmount);
+        return (pf.orderId, pf.status, pf.takerBaseAmount, pf.takerQuoteAmount);
+    }
+
+    /// @notice Returns the FHE handles for a pending fill's priceMatch and effectiveFill
+    /// @dev These handles are needed for public decryption via the Gateway relayer
+    /// @param id The pending fill ID
+    /// @return priceMatchHandle The bytes32 handle for the encrypted price match result
+    /// @return effectiveFillHandle The bytes32 handle for the encrypted effective fill amount
+    function getPendingFillHandles(uint256 id)
+        external
+        view
+        returns (bytes32 priceMatchHandle, bytes32 effectiveFillHandle)
+    {
+        if (id >= _pendingFills.length) revert InvalidPendingFillId();
+        PendingFill storage pf = _pendingFills[id];
+        return (ebool.unwrap(pf.priceMatch), euint64.unwrap(pf.effectiveFill));
     }
 }

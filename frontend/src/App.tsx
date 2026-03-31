@@ -1,53 +1,22 @@
-import { useState, useEffect, createContext, useContext } from "react";
 import { Outlet, NavLink, useLocation } from "react-router-dom";
-import { connectWallet, switchToSepolia } from "./lib/contract";
-import { getAddress } from "ethers";
-
-type WalletCtx = {
-  account: string;
-  connect: () => Promise<void>;
-};
-
-const WalletContext = createContext<WalletCtx>({
-  account: "",
-  connect: async () => {},
-});
+import { useAccount } from "wagmi";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
 
 export function useWallet() {
-  return useContext(WalletContext);
+  const { address } = useAccount();
+  return {
+    account: address ?? "",
+    connect: async () => {
+      // RainbowKit handles connection via ConnectButton
+    },
+  };
 }
 
 export default function App() {
-  const [account, setAccount] = useState("");
   const location = useLocation();
 
-  const connect = async () => {
-    await switchToSepolia();
-    const addr = await connectWallet();
-    setAccount(addr);
-  };
-
-  useEffect(() => {
-    if (window.ethereum) {
-      window.ethereum
-        .request({ method: "eth_accounts" })
-        .then((result) => {
-          const accounts = result as string[];
-          if (accounts.length > 0) setAccount(getAddress(accounts[0]));
-        });
-      window.ethereum.on("accountsChanged", (...args: unknown[]) => {
-        const accounts = args[0] as string[];
-        setAccount(accounts[0] ? getAddress(accounts[0]) : "");
-      });
-    }
-  }, []);
-
-  const short = account
-    ? `${account.slice(0, 6)}...${account.slice(-4)}`
-    : "";
-
   return (
-    <WalletContext.Provider value={{ account, connect }}>
+    <>
       {/* Navigation */}
       <nav className="sticky top-0 z-50 border-b border-[#1e293b] bg-[#0a0e17]/90 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
@@ -100,25 +69,52 @@ export default function App() {
 
             {/* Right side: Network badge + Wallet */}
             <div className="flex items-center gap-3">
-              {/* Network Status */}
-              <div className="hidden md:flex items-center gap-2 text-xs text-slate-500 bg-[#111827] rounded-full px-3 py-1.5 border border-[#1e293b]">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
-                <span>Sepolia</span>
-              </div>
-
-              {account ? (
-                <div className="flex items-center gap-2 bg-[#111827] border border-[#1e293b] rounded-full px-4 py-2 hover:border-blue-500/30 transition-colors duration-300">
-                  <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
-                  <span className="text-sm font-mono text-slate-300">{short}</span>
-                </div>
-              ) : (
-                <button
-                  onClick={connect}
-                  className="bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white px-5 py-2 rounded-full text-sm font-medium transition-all duration-200 shadow-[0_0_20px_rgba(59,130,246,0.3)] hover:shadow-[0_0_30px_rgba(59,130,246,0.4)] cursor-pointer"
-                >
-                  Connect Wallet
-                </button>
-              )}
+              <ConnectButton.Custom>
+                {({ account, chain, openAccountModal, openChainModal, openConnectModal, mounted }) => {
+                  const connected = mounted && account && chain;
+                  return (
+                    <div {...(!mounted ? { "aria-hidden": true, style: { opacity: 0, pointerEvents: "none" as const, userSelect: "none" as const } } : {})}>
+                      {(() => {
+                        if (!connected) {
+                          return (
+                            <button
+                              onClick={openConnectModal}
+                              className="bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white px-5 py-2 rounded-full text-sm font-medium transition-all duration-200 shadow-[0_0_20px_rgba(59,130,246,0.3)] hover:shadow-[0_0_30px_rgba(59,130,246,0.4)] cursor-pointer"
+                            >
+                              Connect Wallet
+                            </button>
+                          );
+                        }
+                        if (chain.unsupported) {
+                          return (
+                            <button
+                              onClick={openChainModal}
+                              className="bg-red-500/20 border border-red-500/30 text-red-400 px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 cursor-pointer hover:bg-red-500/30"
+                            >
+                              Wrong Network
+                            </button>
+                          );
+                        }
+                        return (
+                          <div className="flex items-center gap-3">
+                            <div className="hidden md:flex items-center gap-2 text-xs text-slate-500 bg-[#111827] rounded-full px-3 py-1.5 border border-[#1e293b]">
+                              <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
+                              <span>{chain.name}</span>
+                            </div>
+                            <button
+                              onClick={openAccountModal}
+                              className="flex items-center gap-2 bg-[#111827] border border-[#1e293b] rounded-full px-4 py-2 hover:border-blue-500/30 transition-colors duration-300 cursor-pointer"
+                            >
+                              <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
+                              <span className="text-sm font-mono text-slate-300">{account.displayName}</span>
+                            </button>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  );
+                }}
+              </ConnectButton.Custom>
             </div>
           </div>
 
@@ -168,6 +164,6 @@ export default function App() {
           </div>
         </div>
       </footer>
-    </WalletContext.Provider>
+    </>
   );
 }

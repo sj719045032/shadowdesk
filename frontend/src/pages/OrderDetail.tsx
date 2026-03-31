@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getContract, CONTRACT_ADDRESS, approveCUSDC, approveCWETH, parseUnits, formatUnits, fetchOrderFillIds, fetchFillDetail, requestAccess, getAccessRequests, getGrantedAddresses, type FillData } from "../lib/contract";
+import { CONTRACT_ADDRESS, CWETH_ADDRESS, CUSDC_ADDRESS, ZERO_FHE_HANDLE, needsOperatorSetup, ensureOperatorSet, parseUnits, formatUnits, fetchOrderFillIds, fetchFillDetail, getAccessRequests, getGrantedAddresses, getAccessStatus, otcRead, otcWrite, waitTx, cwethRead, cusdcRead, getPendingFillsForOrder, parseFillInitiatedId, parseFillCancelledReason, type FillData, type PendingFillInfo } from "../lib/contract";
 import { useWallet } from "../App";
-import { encryptInputs, decryptValues, unscaleFromFHE } from "../lib/fhevm";
+import { encryptInputs, publicDecryptFillHandles, decryptValues, unscaleFromFHE } from "../lib/fhevm";
 import TransactionModal, { type Step } from "../components/TransactionModal";
 
 export default function OrderDetail() {
@@ -12,10 +12,11 @@ export default function OrderDetail() {
   const orderId = Number(id);
 
   const [order, setOrder] = useState<{
-    maker: string; tokenPair: string; isBuy: boolean; status: number;
+    tokenPair: string; isBuy: boolean; status: number;
     createdAt: number; baseDeposit: string; quoteDeposit: string;
     baseRemaining: string; quoteRemaining: string;
   } | null>(null);
+  const [isMaker, setIsMaker] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [decryptedPrice, setDecryptedPrice] = useState<number | null>(null);
   const [decryptedAmount, setDecryptedAmount] = useState<number | null>(null);
@@ -24,15 +25,21 @@ export default function OrderDetail() {
   const [fillAmount, setFillAmount] = useState("");
   const [filling, setFilling] = useState(false);
   const [fillError, setFillError] = useState("");
+  const [takerBalance, setTakerBalance] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [fills, setFills] = useState<FillData[]>([]);
   const [fillsLoading, setFillsLoading] = useState(true);
+
+  // Pending fill recovery state
+  const [pendingFills, setPendingFills] = useState<PendingFillInfo[]>([]);
+  const [resuming, setResuming] = useState(false);
 
   // Access management state
   const [accessRequests, setAccessRequests] = useState<string[]>([]);
   const [grantedAddresses, setGrantedAddresses] = useState<string[]>([]);
   const [accessLoading, setAccessLoading] = useState(true);
   const [accessRequested, setAccessRequested] = useState(false);
+  const [accessGranted, setAccessGranted] = useState(false);
 
   // Transaction modal state
   const [txModalOpen, setTxModalOpen] = useState(false);
@@ -56,30 +63,53 @@ export default function OrderDetail() {
     setTxSteps((prev) => prev.map((s) => s.status === "active" ? { ...s, status: "error" } : s));
   }
 
-  useEffect(() => { loadOrder(); loadFills(); loadAccessData(); }, [orderId]);
+  useEffect(() => { loadOrder(); loadFills(); loadAccessData(); loadPendingFills(); }, [orderId, account]);
+
+  async function loadPendingFills() {
+    if (!account) { setPendingFills([]); return; }
+    try {
+      const pending = await getPendingFillsForOrder(orderId);
+      setPendingFills(pending);
+    } catch {
+      // non-critical
+    }
+  }
 
   async function loadAccessData() {
     try {
       setAccessLoading(true);
-      const [requests, granted] = await Promise.all([
-        getAccessRequests(orderId),
-        getGrantedAddresses(orderId),
-      ]);
-      setAccessRequests(requests);
-      setGrantedAddresses(granted);
-      // Check if current user already requested access
-      if (account) {
-        const hasRequested = requests.some(
-          (addr) => addr.toLowerCase() === account.toLowerCase()
-        );
-        const hasGranted = granted.some(
-          (addr) => addr.toLowerCase() === account.toLowerCase()
-        );
-        setAccessRequested(hasRequested || hasGranted);
+
+      if (!account) {
+        setIsMaker(false);
+        setAccessRequests([]);
+        setGrantedAddresses([]);
+        setAccessRequested(false);
+        setAccessGranted(false);
+        return;
+      }
+
+      const status = await getAccessStatus(orderId);
+      setIsMaker(status.isMaker);
+      setAccessRequested(status.hasRequested);
+      setAccessGranted(status.hasAccess);
+
+      if (status.isMaker) {
+        const [requests, granted] = await Promise.all([
+          getAccessRequests(orderId),
+          getGrantedAddresses(orderId),
+        ]);
+        setAccessRequests(requests);
+        setGrantedAddresses(granted);
+      } else {
+        setAccessRequests([]);
+        setGrantedAddresses([]);
       }
     } catch {
       setAccessRequests([]);
       setGrantedAddresses([]);
+      setAccessRequested(false);
+      setAccessGranted(false);
+      setIsMaker(false);
     } finally {
       setAccessLoading(false);
     }
@@ -88,15 +118,14 @@ export default function OrderDetail() {
   async function loadOrder() {
     try {
       setLoading(true);
-      const contract = await getContract();
-      const o = await contract.getOrder(orderId);
+      const o = await otcRead<readonly unknown[]>("getOrder", [orderId]);
       setOrder({
-        maker: o[0], tokenPair: o[1], isBuy: o[2], status: Number(o[3]),
-        createdAt: Number(o[4]),
-        baseDeposit: formatUnits(o[5] ?? 0n, 18),
-        quoteDeposit: formatUnits(o[6] ?? 0n, 6),
-        baseRemaining: formatUnits(o[7] ?? 0n, 18),
-        quoteRemaining: formatUnits(o[8] ?? 0n, 6),
+        tokenPair: o[0] as string, isBuy: o[1] as boolean, status: Number(o[2]),
+        createdAt: Number(o[3]),
+        baseDeposit: formatUnits((o[4] as bigint) ?? 0n, 18),
+        quoteDeposit: formatUnits((o[5] as bigint) ?? 0n, 6),
+        baseRemaining: formatUnits((o[6] as bigint) ?? 0n, 18),
+        quoteRemaining: formatUnits((o[7] as bigint) ?? 0n, 6),
       });
     } catch {
       setOrder(null);
@@ -120,48 +149,104 @@ export default function OrderDetail() {
 
   async function handleDecrypt() {
     if (!account) { await connect(); return; }
-    const steps: Step[] = [
-      { label: "Generating keypair", status: "pending" },
-      { label: "Signing request", status: "pending" },
-      { label: "Decrypting via KMS", status: "pending" },
-    ];
-    openTxModal("Decrypting Order", steps);
     try {
       setDecrypting(true); setDecryptError("");
 
-      updateTxStep(0, "active");
-      const contract = await getContract();
-      const encPrice = await contract.getPrice(orderId);
-      const encAmount = await contract.getAmount(orderId);
-      updateTxStep(0, "done");
+      // Read all handles in parallel, then decrypt in one signing request
+      const isSellOrder = !order!.isBuy;
+      const readFn = isSellOrder ? cusdcRead : cwethRead;
+      const tokenAddr = isSellOrder ? CUSDC_ADDRESS : CWETH_ADDRESS;
 
-      updateTxStep(1, "active");
-      // Signing happens inside decryptValues
-      const results = await decryptValues(
-        [
-          { handle: encPrice.toString(), contractAddress: CONTRACT_ADDRESS },
-          { handle: encAmount.toString(), contractAddress: CONTRACT_ADDRESS },
-        ],
-        account,
-      );
-      updateTxStep(1, "done");
+      const [encPrice, encAmount, balanceHandle] = await Promise.all([
+        otcRead<string>("getPrice", [orderId]),
+        otcRead<string>("getAmount", [orderId]),
+        readFn<string>("confidentialBalanceOf", [account]).then(String).catch(() => ZERO_FHE_HANDLE),
+      ]);
 
-      updateTxStep(2, "active");
+      // Build handles array — order terms + optional balance
+      const handles: { handle: string; contractAddress: string }[] = [
+        { handle: encPrice.toString(), contractAddress: CONTRACT_ADDRESS },
+        { handle: encAmount.toString(), contractAddress: CONTRACT_ADDRESS },
+      ];
+      const hasBalance = balanceHandle && balanceHandle !== ZERO_FHE_HANDLE;
+      if (hasBalance) {
+        handles.push({ handle: balanceHandle, contractAddress: tokenAddr });
+      }
+
+      // Single decryptValues call = single wallet signature
+      const results = await decryptValues(handles, account);
       const values = [...results.values()];
+
       const p = unscaleFromFHE(Number(values[0] || 0n));
       const a = unscaleFromFHE(Number(values[1] || 0n));
       setDecryptedPrice(p);
       setDecryptedAmount(a);
-      // Default fill to remaining, not original
+
+      if (hasBalance && values[2] !== undefined) {
+        setTakerBalance(String(Number(values[2]) / 1e6));
+      } else {
+        setTakerBalance("0");
+      }
+
       const remaining = order!.isBuy ? Number(order!.quoteRemaining) / p : Number(order!.baseRemaining);
-      setFillAmount(String(remaining > 0 ? remaining : a));
-      updateTxStep(2, "done");
-    } catch {
-      const msg = "Access denied. Ask the maker to grant you access first.";
-      setDecryptError(msg);
-      failTxModal(msg);
+      setFillAmount(String(remaining));
+    } catch (err) {
+      const msg = (err as Error).message || "";
+      if (msg.toLowerCase().includes("reject") || msg.toLowerCase().includes("denied") || msg.toLowerCase().includes("cancel")) {
+        setDecryptError("Signature rejected by user.");
+      } else {
+        setDecryptError("Access denied. Ask the maker to grant you access first.");
+      }
     } finally {
       setDecrypting(false);
+    }
+  }
+
+  async function handleResumeFill(pf: PendingFillInfo) {
+    const steps: Step[] = [
+      { label: "Decrypting match result", status: "pending" },
+      { label: "Settling fill", status: "pending" },
+      { label: "Waiting for confirmation", status: "pending" },
+    ];
+    openTxModal("Resuming Fill", steps);
+    setResuming(true);
+
+    try {
+      // Step 1: Decrypt
+      updateTxStep(0, "active");
+      const handles = await otcRead<readonly [`0x${string}`, `0x${string}`]>(
+        "getPendingFillHandles", [pf.pendingFillId],
+      );
+      const decryptResult = await publicDecryptFillHandles(handles[0], handles[1]);
+      updateTxStep(0, "done");
+
+      // Step 2: Settle
+      updateTxStep(1, "active");
+      const hash = await otcWrite("settleFill", [
+        pf.pendingFillId,
+        decryptResult.priceMatched,
+        decryptResult.fillAmount,
+        decryptResult.handlesList,
+        decryptResult.cleartexts,
+        decryptResult.decryptionProof,
+      ]);
+      updateTxStep(1, "done");
+
+      // Step 3: Wait for confirmation
+      updateTxStep(2, "active");
+      const receipt = await waitTx(hash);
+
+      const cancelReason = parseFillCancelledReason(receipt.logs);
+      if (cancelReason) throw new Error(cancelReason);
+      updateTxStep(2, "done");
+
+      await Promise.all([loadOrder(), loadFills(), loadPendingFills()]);
+    } catch (err) {
+      const msg = (err as Error).message?.slice(0, 120) || "Resume failed";
+      setFillError(msg);
+      failTxModal(msg);
+    } finally {
+      setResuming(false);
     }
   }
 
@@ -169,114 +254,95 @@ export default function OrderDetail() {
     if (!account || !decryptedPrice || !fillAmount) return;
     const fillAmt = Number(fillAmount);
     const price = decryptedPrice;
+    setFillError("");
 
+    // Pre-flight balance check: taker must have confidential tokens
     const isSellOrder = !order!.isBuy;
-    const steps: Step[] = isSellOrder
-      ? [
-          { label: "Encrypting bid", status: "pending" },
-          { label: "Approving cUSDC", status: "pending" },
-          { label: "Initiating fill (FHE matching)", status: "pending" },
-          { label: "Waiting for TX1 confirmation", status: "pending" },
-          { label: "Decrypting match result", status: "pending" },
-          { label: "Settling fill", status: "pending" },
-          { label: "Waiting for TX2 confirmation", status: "pending" },
-        ]
-      : [
-          { label: "Encrypting bid", status: "pending" },
-          { label: "Approving cWETH", status: "pending" },
-          { label: "Initiating fill (FHE matching)", status: "pending" },
-          { label: "Waiting for TX1 confirmation", status: "pending" },
-          { label: "Decrypting match result", status: "pending" },
-          { label: "Settling fill", status: "pending" },
-          { label: "Waiting for TX2 confirmation", status: "pending" },
-        ];
+    const payToken = isSellOrder ? "cUSDC" : "cWETH";
+    const readFn = isSellOrder ? cusdcRead : cwethRead;
+    try {
+      const handle = String(await readFn<string>("confidentialBalanceOf", [account]));
+      if (!handle || handle === ZERO_FHE_HANDLE) {
+        setFillError(`No ${payToken} balance. Wrap tokens in Vault first.`);
+        return;
+      }
+    } catch {
+      // non-blocking: skip check if read fails
+    }
+
+    // Authorization gate — separate from business flow
+    if (await needsOperatorSetup()) {
+      openTxModal("Authorization", [{ label: "Setting up OTC authorization", status: "active" }]);
+      try {
+        await ensureOperatorSet();
+        setTxModalOpen(false);
+      } catch (err) {
+        failTxModal((err as Error).message?.slice(0, 100) || "Authorization failed");
+        return;
+      }
+    }
+
+    const steps: Step[] = [
+      { label: "Encrypting bid", status: "pending" },
+      { label: "Submitting fill", status: "pending" },
+      { label: "Decrypting result", status: "pending" },
+      { label: "Settling", status: "pending" },
+    ];
     openTxModal("Filling Order", steps);
 
     try {
       setFilling(true); setFillError("");
-      let stepIdx = 0;
 
       // Step 1: Encrypting bid
-      updateTxStep(stepIdx, "active");
+      updateTxStep(0, "active");
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 100)));
       const encrypted = await encryptInputs(account, price, fillAmt);
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
+      updateTxStep(0, "done");
 
-      const contract = await getContract(true);
+      const ethAmt = String(fillAmt);
+      const usdcAmt = String(fillAmt * price);
 
-      let ethAmt: string;
-      let usdcAmt: string;
-
-      if (order!.isBuy) {
-        ethAmt = String(fillAmt);
-        usdcAmt = String(fillAmt * price);
-
-        // Step 2: Approving cWETH
-        updateTxStep(stepIdx, "active");
-        await approveCWETH(ethAmt);
-        updateTxStep(stepIdx, "done");
-        stepIdx++;
-      } else {
-        ethAmt = String(fillAmt);
-        usdcAmt = String(fillAmt * price);
-
-        // Step 2: Approving cUSDC
-        updateTxStep(stepIdx, "active");
-        if (Number(usdcAmt) > 0) await approveCUSDC(usdcAmt);
-        updateTxStep(stepIdx, "done");
-        stepIdx++;
-      }
-
-      // Step 3: Initiating fill (FHE matching)
-      updateTxStep(stepIdx, "active");
-      const tx1 = await contract.initiateFill(
+      // Step 2: Submitting fill (initiateFill + confirmation)
+      updateTxStep(1, "active");
+      const hash1 = await otcWrite("initiateFill", [
         orderId,
         encrypted.handles[0], encrypted.inputProof,
         encrypted.handles[1], encrypted.inputProof,
         parseUnits(ethAmt, 18),
         parseUnits(usdcAmt, 6),
+      ]);
+      const receipt = await waitTx(hash1);
+      const pendingFillId = parseFillInitiatedId(receipt.logs);
+      updateTxStep(1, "done");
+
+      // Step 3: Decrypting result via Gateway
+      updateTxStep(2, "active");
+      const handles = await otcRead<readonly [`0x${string}`, `0x${string}`]>(
+        "getPendingFillHandles", [pendingFillId],
       );
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
+      const decryptResult = await publicDecryptFillHandles(handles[0], handles[1]);
+      updateTxStep(2, "done");
 
-      // Step 4: Waiting for TX1 confirmation
-      updateTxStep(stepIdx, "active");
-      const receipt = await tx1.wait();
-      // Parse pendingFillId from FillInitiated event
-      const iface = contract.interface;
-      const fillInitiatedTopic = iface.getEvent("FillInitiated")!.topicHash;
-      const eventLog = receipt.logs.find((log: { topics: string[] }) => log.topics[0] === fillInitiatedTopic);
-      const pendingFillId = eventLog ? BigInt(eventLog.topics[2]) : 0n;
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      // Step 5: Decrypting match result
-      // In demo/mock mode the contract accepts empty proofs.
-      // Full production flow would call publicDecrypt via the gateway relayer here.
-      updateTxStep(stepIdx, "active");
-      // Brief pause to simulate decryption relay
-      await new Promise((r) => setTimeout(r, 1000));
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      // Step 6: Settling fill
-      updateTxStep(stepIdx, "active");
-      const tx2 = await contract.settleFill(
+      // Step 4: Settling (settleFill + confirmation)
+      updateTxStep(3, "active");
+      const hash2 = await otcWrite("settleFill", [
         pendingFillId,
-        [],    // handles (empty for demo/mock mode)
-        "0x",  // cleartexts
-        "0x",  // proof
-      );
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
+        decryptResult.priceMatched,
+        decryptResult.fillAmount,
+        decryptResult.handlesList,
+        decryptResult.cleartexts,
+        decryptResult.decryptionProof,
+      ]);
+      const receipt2 = await waitTx(hash2);
 
-      // Step 7: Waiting for TX2 confirmation
-      updateTxStep(stepIdx, "active");
-      await tx2.wait();
-      updateTxStep(stepIdx, "done");
+      const fillCancelReason = parseFillCancelledReason(receipt2.logs);
+      if (fillCancelReason) {
+        throw new Error(fillCancelReason);
+      }
 
-      await loadOrder();
-      await loadFills();
+      updateTxStep(3, "done");
+
+      await Promise.all([loadOrder(), loadFills(), loadPendingFills()]);
       // Reset decrypt state so remaining recalculates on next decrypt
       setDecryptedPrice(null);
       setDecryptedAmount(null);
@@ -302,15 +368,37 @@ export default function OrderDetail() {
 
     try {
       updateTxStep(0, "active");
-      const contract = await getContract(true);
-      const tx = await contract.grantAccess(orderId, addr);
+      const hash = await otcWrite("grantAccess", [orderId, addr]);
       updateTxStep(0, "done");
 
       updateTxStep(1, "active");
-      await tx.wait();
+      await waitTx(hash);
       updateTxStep(1, "done");
+      await loadAccessData();
     } catch (err) {
       failTxModal((err as Error).message?.slice(0, 100) || "Transaction failed");
+    }
+  }
+
+  async function handleCancelOrder() {
+    if (!confirm("Are you sure you want to cancel this order? Your escrowed tokens will be refunded.")) return;
+    const steps: Step[] = [
+      { label: "Cancelling order", status: "pending" },
+      { label: "Waiting for confirmation", status: "pending" },
+    ];
+    openTxModal("Cancel Order", steps);
+    try {
+      updateTxStep(0, "active");
+      const hash = await otcWrite("cancelOrder", [orderId]);
+      updateTxStep(0, "done");
+
+      updateTxStep(1, "active");
+      await waitTx(hash);
+      updateTxStep(1, "done");
+
+      await loadOrder();
+    } catch (err) {
+      failTxModal((err as Error).message?.slice(0, 100) || "Cancel failed");
     }
   }
 
@@ -323,12 +411,13 @@ export default function OrderDetail() {
     openTxModal("Requesting Access", steps);
     try {
       updateTxStep(0, "active");
-      await requestAccess(orderId);
+      const hash = await otcWrite("requestAccess", [orderId]);
       updateTxStep(0, "done");
       updateTxStep(1, "active");
-      // requestAccess already waits for tx
+      await waitTx(hash);
       updateTxStep(1, "done");
       setAccessRequested(true);
+      setAccessGranted(false);
       await loadAccessData();
     } catch (err) {
       failTxModal((err as Error).message?.slice(0, 100) || "Transaction failed");
@@ -343,11 +432,10 @@ export default function OrderDetail() {
     openTxModal("Granting Access", steps);
     try {
       updateTxStep(0, "active");
-      const contract = await getContract(true);
-      const tx = await contract.grantAccess(orderId, addr);
+      const hash = await otcWrite("grantAccess", [orderId, addr]);
       updateTxStep(0, "done");
       updateTxStep(1, "active");
-      await tx.wait();
+      await waitTx(hash);
       updateTxStep(1, "done");
       await loadAccessData();
     } catch (err) {
@@ -358,7 +446,6 @@ export default function OrderDetail() {
   if (loading) return <div className="flex items-center justify-center py-20"><div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full spinner" /></div>;
   if (!order) return <div className="text-center py-20 text-slate-400">Order #{orderId} not found</div>;
 
-  const isMaker = account?.toLowerCase() === order.maker.toLowerCase();
   const usdcToPay = decryptedPrice && fillAmount ? (Number(fillAmount) * decryptedPrice).toLocaleString() : "—";
 
   return (
@@ -428,11 +515,15 @@ export default function OrderDetail() {
             </div>
           </div>
 
-          {decryptedPrice === null && (
+          {decryptedPrice === null && (isMaker || accessGranted) && (
             <>
               {decryptError && (
-                <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 mb-3 text-sm text-red-400">
-                  🚫 {decryptError}
+                <div className={`rounded-lg p-3 mb-3 text-sm ${
+                  decryptError.includes("rejected")
+                    ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
+                    : "bg-red-500/10 border border-red-500/20 text-red-400"
+                }`}>
+                  {decryptError.includes("rejected") ? "⚠️" : "🚫"} {decryptError}
                 </div>
               )}
               <button onClick={handleDecrypt} disabled={decrypting}
@@ -444,13 +535,13 @@ export default function OrderDetail() {
         </div>
       </div>
 
-      {/* Access Management */}
-      {order.status === 0 && (
-        <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-6">
-          <div className="p-6">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Access Management</h3>
+      {/* Access Management — hide for granted non-makers (they can already decrypt/fill) */}
+      {order.status === 0 && !(isMaker === false && accessGranted) && (
+        <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-4">
+          <div className="px-5 py-4">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Access</h3>
 
-            {accessLoading ? (
+            {accessLoading || isMaker === null ? (
               <div className="flex items-center justify-center py-6">
                 <div className="w-5 h-5 border-2 border-purple-500/30 border-t-purple-500 rounded-full spinner" />
               </div>
@@ -513,7 +604,11 @@ export default function OrderDetail() {
             ) : (
               /* Taker view: request access button or requested state */
               <div>
-                {accessRequested ? (
+                {accessGranted ? (
+                  <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 text-sm text-emerald-400">
+                    {"\u2713"} Access Granted
+                  </div>
+                ) : accessRequested ? (
                   <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 text-sm text-emerald-400">
                     {"\u2713"} Access Requested
                   </div>
@@ -531,18 +626,18 @@ export default function OrderDetail() {
         </div>
       )}
 
-      {/* Fill History */}
-      <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-6">
-        <div className="p-6">
-          <h3 className="text-sm font-semibold text-slate-300 mb-4">
-            Fill History {!fillsLoading && `(${fills.length} fill${fills.length !== 1 ? "s" : ""})`}
+      {/* Fill History — compact, collapse when empty */}
+      <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-4">
+        <div className="px-5 py-4">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            Fills {!fillsLoading && fills.length > 0 && `(${fills.length})`}
           </h3>
           {fillsLoading ? (
-            <div className="flex items-center justify-center py-6">
-              <div className="w-5 h-5 border-2 border-blue-500/30 border-t-blue-500 rounded-full spinner" />
+            <div className="flex items-center justify-center py-3">
+              <div className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-500 rounded-full spinner" />
             </div>
           ) : fills.length === 0 ? (
-            <div className="text-sm text-slate-500 py-4 text-center">No fills yet</div>
+            <div className="text-xs text-slate-600">No fills yet</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
@@ -573,8 +668,40 @@ export default function OrderDetail() {
         </div>
       </div>
 
-      {/* Fill section - only for non-maker, open orders, after decrypt */}
-      {!isMaker && order.status === 0 && decryptedPrice !== null && (
+      {/* Pending fill recovery */}
+      {pendingFills.length > 0 && (
+        <div className="bg-[#111827] border border-amber-500/20 rounded-2xl overflow-hidden mb-6">
+          <div className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <span className="text-amber-400">⚠️</span>
+              <h3 className="text-sm font-semibold text-amber-300">Pending Fill — Needs Settlement</h3>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              A previous fill was initiated but not yet settled. Resume to complete the decryption and settlement.
+            </p>
+            <div className="space-y-3">
+              {pendingFills.map((pf) => (
+                <div key={pf.pendingFillId} className="flex items-center justify-between bg-[#0d1117] rounded-xl px-4 py-3 border border-[#1e293b]/50">
+                  <div>
+                    <div className="text-sm text-slate-300">Fill #{pf.pendingFillId}</div>
+                    <div className="text-xs text-slate-500 font-mono">{pf.txHash.slice(0, 10)}...{pf.txHash.slice(-6)}</div>
+                  </div>
+                  <button
+                    onClick={() => handleResumeFill(pf)}
+                    disabled={resuming}
+                    className="px-4 py-2 rounded-lg text-xs font-medium bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 text-amber-400 transition cursor-pointer disabled:opacity-50"
+                  >
+                    {resuming ? "Resuming..." : "Resume Settlement"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fill section - only for confirmed non-maker, open orders, after decrypt */}
+      {isMaker === false && order.status === 0 && decryptedPrice !== null && (
         <div className="bg-[#111827] border border-[#1e293b] rounded-2xl overflow-hidden gradient-border mb-6">
           <div className="p-6">
             <h3 className="text-sm font-semibold text-slate-300 mb-4">Fill This Order</h3>
@@ -599,15 +726,37 @@ export default function OrderDetail() {
                       <div className="flex justify-between text-sm"><span className="text-slate-400">You receive</span><span className="text-emerald-400 font-medium">{fillAmount} ETH</span></div>
                     </>
                   )}
+                  {takerBalance !== null && (
+                    <div className="flex justify-between text-sm border-t border-[#1e293b]/50 pt-2 mt-2">
+                      <span className="text-slate-500">Your balance</span>
+                      <span className={`font-medium ${Number(takerBalance) >= Number(order.isBuy ? fillAmount : usdcToPay) ? "text-emerald-400" : "text-red-400"}`}>
+                        {Number(takerBalance).toLocaleString()} {order.isBuy ? "cWETH" : "cUSDC"}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
-              {fillError && <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">{fillError}</div>}
-              <button onClick={handleFill} disabled={filling || !fillAmount || Number(fillAmount) <= 0}
-                className={`w-full py-3.5 rounded-xl font-semibold transition cursor-pointer disabled:opacity-50 ${
-                  order.isBuy ? "bg-gradient-to-r from-red-600 to-red-500 text-white" : "bg-gradient-to-r from-emerald-600 to-emerald-500 text-white"
-                }`}>
-                {filling ? "Processing fill..." : order.isBuy ? "Approve cWETH & Fill" : "Approve cUSDC & Fill"}
-              </button>
+              {(() => {
+                const requiredAmount = Number(order.isBuy ? fillAmount : usdcToPay);
+                const bal = takerBalance !== null ? Number(takerBalance) : null;
+                const insufficient = bal !== null && requiredAmount > 0 && bal < requiredAmount;
+                const tokenName = order.isBuy ? "cWETH" : "cUSDC";
+                return (<>
+                  {fillError && <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">{fillError}</div>}
+                  {insufficient && !fillError && (
+                    <div className="text-amber-400 text-sm bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 flex items-center justify-between">
+                      <span>Insufficient {tokenName} balance. Wrap more in Vault.</span>
+                      <a href="/vault" className="text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2 ml-2 whitespace-nowrap">Go to Vault →</a>
+                    </div>
+                  )}
+                  <button onClick={handleFill} disabled={filling || !fillAmount || Number(fillAmount) <= 0 || insufficient}
+                    className={`w-full py-3.5 rounded-xl font-semibold transition cursor-pointer disabled:opacity-50 ${
+                      order.isBuy ? "bg-gradient-to-r from-red-600 to-red-500 text-white" : "bg-gradient-to-r from-emerald-600 to-emerald-500 text-white"
+                    }`}>
+                    {filling ? "Filling..." : "Fill Order"}
+                  </button>
+                </>);
+              })()}
             </div>
           </div>
         </div>
@@ -623,6 +772,10 @@ export default function OrderDetail() {
           <button onClick={() => { const url = window.location.href; navigator.clipboard.writeText(url); setCopiedLink(true); setTimeout(() => setCopiedLink(false), 2000); }}
             className="flex-1 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 text-cyan-400 py-3 rounded-xl text-sm font-medium transition cursor-pointer">
             {copiedLink ? "✓ Copied!" : "Share Link"}
+          </button>
+          <button onClick={handleCancelOrder}
+            className="flex-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 py-3 rounded-xl text-sm font-medium transition cursor-pointer">
+            Cancel Order
           </button>
         </div>
       )}

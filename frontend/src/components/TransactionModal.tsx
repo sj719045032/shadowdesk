@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+
 
 export type Step = {
   label: string;
@@ -13,23 +13,17 @@ export type TransactionModalProps = {
   onClose?: () => void;
 };
 
+// Static hex chars with staggered CSS animations — runs on compositor thread,
+// immune to main-thread blocking from WASM FHE encryption.
+const SCRAMBLE_CHARS = Array.from({ length: 24 }, () =>
+  "0123456789abcdef"[Math.floor(Math.random() * 16)]
+);
+
 function ScrambleHex() {
-  const [chars, setChars] = useState<string[]>([]);
-  const pool = "0123456789abcdef";
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setChars(
-        Array.from({ length: 24 }, () => pool[Math.floor(Math.random() * pool.length)])
-      );
-    }, 80);
-    return () => clearInterval(interval);
-  }, []);
-
   return (
-    <div className="font-mono text-xs text-blue-500/60 tracking-wider overflow-hidden text-center">
+    <div className="font-mono text-xs text-blue-500/60 tracking-wider text-center py-1">
       <span className="text-blue-400/40">0x</span>
-      {chars.map((c, i) => (
+      {SCRAMBLE_CHARS.map((c, i) => (
         <span key={i} className="scramble-char" style={{ animationDelay: `${i * 0.05}s` }}>
           {c}
         </span>

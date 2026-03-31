@@ -1,135 +1,180 @@
-import { BrowserProvider, Contract, getAddress, parseUnits, formatUnits } from "ethers";
+import {
+  readContract,
+  writeContract,
+  waitForTransactionReceipt,
+  getPublicClient,
+  getWalletClient,
+  getAccount,
+} from "@wagmi/core";
+import { decodeEventLog, parseAbiItem, parseUnits, formatUnits, getAddress, type Abi } from "viem";
+import { config } from "../wagmi";
 import ABI from "./abi.json";
+import CWETH_ABI from "./cweth-abi.json";
+import CUSDC_ABI from "./cusdc-abi.json";
 
-export const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || "";
-export const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
-export const CWETH_ADDRESS = import.meta.env.VITE_CWETH_ADDRESS || "";
-export const CUSDC_ADDRESS = import.meta.env.VITE_CUSDC_ADDRESS || "";
+export const CONTRACT_ADDRESS = (import.meta.env.VITE_CONTRACT_ADDRESS || "") as `0x${string}`;
+export const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238" as `0x${string}`;
+export const CWETH_ADDRESS = (import.meta.env.VITE_CWETH_ADDRESS || "") as `0x${string}`;
+export const CUSDC_ADDRESS = (import.meta.env.VITE_CUSDC_ADDRESS || "") as `0x${string}`;
 export const SEPOLIA_CHAIN_ID = 11155111;
+const CWETH_DEPLOY_BLOCK = 10558864n;
+const CUSDC_DEPLOY_BLOCK = 10558865n;
+const OTC_DEPLOY_BLOCK = 10558866n;
+
+export type PendingUnwrap = {
+  token: "ETH" | "USDC";
+  contractAddress: `0x${string}`;
+  handle: `0x${string}`;
+  txHash: `0x${string}`;
+  blockNumber: bigint;
+};
+
+export const ZERO_FHE_HANDLE = ("0x" + "0".repeat(64)) as `0x${string}`;
+
+const OTC_ABI = ABI as Abi;
+const CWETH_CONTRACT_ABI = CWETH_ABI as Abi;
+const CUSDC_CONTRACT_ABI = CUSDC_ABI as Abi;
 
 const ERC20_ABI = [
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function balanceOf(address account) view returns (uint256)",
-  "function decimals() view returns (uint8)",
-  "function symbol() view returns (string)",
-];
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ type: "bool" }],
+  },
+  {
+    name: "allowance",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    name: "balanceOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+] as const;
 
-export function getProvider() {
-  if (!window.ethereum) throw new Error("MetaMask not found");
-  return new BrowserProvider(window.ethereum);
-}
-
-export async function getSigner() {
-  const provider = getProvider();
-  return provider.getSigner();
-}
-
-export async function getContract(withSigner = false) {
-  if (!CONTRACT_ADDRESS) throw new Error("Contract address not configured");
-  if (withSigner) {
-    const signer = await getSigner();
-    return new Contract(CONTRACT_ADDRESS, ABI, signer);
-  }
-  const provider = getProvider();
-  return new Contract(CONTRACT_ADDRESS, ABI, provider);
-}
-
-export async function getUSDC(withSigner = false) {
-  if (withSigner) {
-    const signer = await getSigner();
-    return new Contract(USDC_ADDRESS, ERC20_ABI, signer);
-  }
-  const provider = getProvider();
-  return new Contract(USDC_ADDRESS, ERC20_ABI, provider);
-}
-
-export async function getUSDCBalance(address: string): Promise<string> {
-  const usdc = await getUSDC();
-  const balance = await usdc.balanceOf(address);
-  return formatUnits(balance, 6); // USDC has 6 decimals
-}
-
-export async function approveCUSDC(amount: string): Promise<void> {
-  const signer = await getSigner();
-  const address = await signer.getAddress();
-  const cusdc = await getCUSDC();
-  const needed = parseUnits(amount, 6);
-  const allowance = await cusdc.allowance(address, CONTRACT_ADDRESS);
-  // Skip if already authorized enough
-  if (allowance >= needed) return;
-  // Only approve the needed amount
-  const cusdcWithSigner = await getCUSDC(true);
-  const tx = await cusdcWithSigner.approve(CONTRACT_ADDRESS, needed);
-  await tx.wait();
-}
-
-export async function approveCWETH(amount: string): Promise<void> {
-  const signer = await getSigner();
-  const address = await signer.getAddress();
-  const cweth = await getCWETH();
-  const needed = parseUnits(amount, 18);
-  const allowance = await cweth.allowance(address, CONTRACT_ADDRESS);
-  // Skip if already authorized enough
-  if (allowance >= needed) return;
-  // Only approve the needed amount
-  const cwethWithSigner = await getCWETH(true);
-  const tx = await cwethWithSigner.approve(CONTRACT_ADDRESS, needed);
-  await tx.wait();
-}
-
-export async function connectWallet(): Promise<string> {
-  const provider = getProvider();
-  const accounts = await provider.send("eth_requestAccounts", []);
-  return getAddress(accounts[0]);
-}
-
-export async function switchToSepolia() {
-  try {
-    await window.ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: "0xaa36a7" }],
-    });
-  } catch (err: unknown) {
-    if ((err as { code: number }).code === 4902) {
-      await window.ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [
-          {
-            chainId: "0xaa36a7",
-            chainName: "Sepolia",
-            rpcUrls: ["https://rpc.sepolia.org"],
-            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-            blockExplorerUrls: ["https://sepolia.etherscan.io"],
-          },
-        ],
-      });
-    }
-  }
-}
+// ─── Read helpers ──────────────────────────────────────────────
 
 export async function getETHBalance(address: string): Promise<string> {
-  const provider = getProvider();
-  const balance = await provider.getBalance(address);
+  const client = getPublicClient(config);
+  const balance = await client.getBalance({ address: address as `0x${string}` });
   return formatUnits(balance, 18);
 }
 
-// Note: cWETH/cUSDC balances are encrypted (euint64). These return the handle.
-// To see the actual balance, use decrypt in the Vault page.
-// Here we return "encrypted" as a placeholder - actual decrypt happens in Vault.
-export async function getCWETHBalance(_address: string): Promise<string> {
-  // Encrypted balance - can't read directly. Return "encrypted" indicator.
-  // Real balance visible only via Vault decrypt.
-  return "🔒";
+export async function getUSDCBalance(address: string): Promise<string> {
+  const balance = await readContract(config, {
+    address: USDC_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: [address as `0x${string}`],
+  });
+  return formatUnits(balance as bigint, 6);
 }
 
-export async function getCUSDCBalance(_address: string): Promise<string> {
-  return "🔒";
+// ─── OTC Contract reads ────────────────────────────────────────
+
+export async function otcRead<T = unknown>(functionName: string, args: unknown[] = [], account?: `0x${string}`): Promise<T> {
+  return readContract(config, {
+    address: CONTRACT_ADDRESS,
+    abi: OTC_ABI,
+    functionName,
+    args,
+    ...(account ? { account } : {}),
+  }) as Promise<T>;
 }
+
+export async function otcWrite(functionName: string, args: unknown[] = [], value?: bigint): Promise<`0x${string}`> {
+  return writeContract(config, {
+    address: CONTRACT_ADDRESS,
+    abi: OTC_ABI,
+    functionName,
+    args,
+    ...(value !== undefined ? { value } : {}),
+  });
+}
+
+export async function waitTx(hash: `0x${string}`) {
+  return waitForTransactionReceipt(config, { hash });
+}
+
+// ─── Wrapper token reads ───────────────────────────────────────
+
+export async function cwethRead<T = unknown>(functionName: string, args: unknown[] = []): Promise<T> {
+  return readContract(config, {
+    address: CWETH_ADDRESS,
+    abi: CWETH_CONTRACT_ABI,
+    functionName,
+    args,
+  }) as Promise<T>;
+}
+
+export async function cusdcRead<T = unknown>(functionName: string, args: unknown[] = []): Promise<T> {
+  return readContract(config, {
+    address: CUSDC_ADDRESS,
+    abi: CUSDC_CONTRACT_ABI,
+    functionName,
+    args,
+  }) as Promise<T>;
+}
+
+// ─── Wrapper token writes ──────────────────────────────────────
+
+export async function cwethWrite(functionName: string, args: unknown[] = [], value?: bigint): Promise<`0x${string}`> {
+  return writeContract(config, {
+    address: CWETH_ADDRESS,
+    abi: CWETH_CONTRACT_ABI,
+    functionName,
+    args,
+    ...(value !== undefined ? { value } : {}),
+  });
+}
+
+export async function cusdcWrite(functionName: string, args: unknown[] = [], value?: bigint): Promise<`0x${string}`> {
+  return writeContract(config, {
+    address: CUSDC_ADDRESS,
+    abi: CUSDC_CONTRACT_ABI,
+    functionName,
+    args,
+    ...(value !== undefined ? { value } : {}),
+  });
+}
+
+// ─── USDC ERC-20 writes ───────────────────────────────────────
+
+export async function usdcApprove(spender: `0x${string}`, amount: bigint): Promise<`0x${string}`> {
+  return writeContract(config, {
+    address: USDC_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: "approve",
+    args: [spender, amount],
+  });
+}
+
+export async function usdcAllowance(owner: `0x${string}`, spender: `0x${string}`): Promise<bigint> {
+  return readContract(config, {
+    address: USDC_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: "allowance",
+    args: [owner, spender],
+  }) as Promise<bigint>;
+}
+
+// ─── Data types ────────────────────────────────────────────────
 
 export type OrderData = {
   id: number;
-  maker: string;
   tokenPair: string;
   isBuy: boolean;
   status: number;
@@ -140,28 +185,6 @@ export type OrderData = {
   quoteRemaining: string;
 };
 
-export async function fetchAllOrders(): Promise<OrderData[]> {
-  const contract = await getContract();
-  const count = await contract.orderCount();
-  const orders: OrderData[] = [];
-  for (let i = 0; i < Number(count); i++) {
-    const o = await contract.getOrder(i);
-    orders.push({
-      id: i,
-      maker: o.maker ?? o[0],
-      tokenPair: o.tokenPair ?? o[1],
-      isBuy: o.isBuy ?? o[2],
-      status: Number(o.status ?? o[3]),
-      createdAt: Number(o.createdAt ?? o[4]),
-      baseDeposit: formatUnits(o.baseDeposit ?? o[5] ?? 0n, 18),
-      quoteDeposit: formatUnits(o.quoteDeposit ?? o[6] ?? 0n, 6),
-      baseRemaining: formatUnits(o.baseRemaining ?? o[7] ?? 0n, 18),
-      quoteRemaining: formatUnits(o.quoteRemaining ?? o[8] ?? 0n, 6),
-    });
-  }
-  return orders;
-}
-
 export type FillData = {
   orderId: number;
   ethTransferred: string;
@@ -169,88 +192,288 @@ export type FillData = {
   filledAt: number;
 };
 
+export type AccessStatus = {
+  hasRequested: boolean;
+  hasAccess: boolean;
+  isMaker: boolean;
+};
+
+// ─── Maker check ──────────────────────────────────────────────
+
+export async function checkIsMaker(orderId: number): Promise<boolean> {
+  const account = getAccount(config).address;
+  if (!account) return false;
+  return otcRead<boolean>("isMaker", [orderId], account);
+}
+
+// ─── Order fetchers ────────────────────────────────────────────
+
+export async function fetchAllOrders(): Promise<OrderData[]> {
+  const count = await otcRead<bigint>("orderCount");
+  const indices = Array.from({ length: Number(count) }, (_, i) => i);
+  const results = await Promise.all(indices.map(i => otcRead<readonly unknown[]>("getOrder", [i])));
+  return results.map((o, i) => ({
+    id: i,
+    tokenPair: o[0] as string,
+    isBuy: o[1] as boolean,
+    status: Number(o[2]),
+    createdAt: Number(o[3]),
+    baseDeposit: formatUnits((o[4] as bigint) ?? 0n, 18),
+    quoteDeposit: formatUnits((o[5] as bigint) ?? 0n, 6),
+    baseRemaining: formatUnits((o[6] as bigint) ?? 0n, 18),
+    quoteRemaining: formatUnits((o[7] as bigint) ?? 0n, 6),
+  }));
+}
+
 export async function fetchMyFillIds(): Promise<number[]> {
-  const contract = await getContract(true); // needs signer for msg.sender
-  const ids: bigint[] = await contract.getMyFills();
+  const account = getAccount(config).address;
+  if (!account) return [];
+  const ids = await otcRead<readonly bigint[]>("getMyFills", [], account);
   return ids.map((id) => Number(id));
 }
 
 export async function fetchFillDetail(fillId: number): Promise<FillData> {
-  const contract = await getContract();
-  const f = await contract.getFill(fillId);
+  const f = await otcRead<readonly unknown[]>("getFill", [fillId]);
   return {
-    orderId: Number(f.orderId ?? f[0]),
-    filledAt: Number(f.filledAt ?? f[1]),
-    ethTransferred: formatUnits(f.ethTransferred ?? f[2] ?? 0n, 18),
-    tokenTransferred: formatUnits(f.tokenTransferred ?? f[3] ?? 0n, 6),
+    orderId: Number(f[0]),
+    filledAt: Number(f[1]),
+    ethTransferred: formatUnits((f[2] as bigint) ?? 0n, 18),
+    tokenTransferred: formatUnits((f[3] as bigint) ?? 0n, 6),
   };
 }
 
 export async function fetchOrderFillIds(orderId: number): Promise<number[]> {
-  const contract = await getContract();
-  const ids: bigint[] = await contract.getOrderFills(orderId);
+  const ids = await otcRead<readonly bigint[]>("getOrderFills", [orderId]);
   return ids.map((id) => Number(id));
 }
 
-// Minimal ABI for confidential tokens (ERC-7984)
-const CONFIDENTIAL_TOKEN_ABI = [
-  "function wrap() payable",
-  "function wrap(uint256 amount) external",
-  "function unwrap(uint256 amount) external",
-  "function balanceOf(address) view returns (bytes32)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function transfer(address to, uint256 amount) returns (bool)",
-  "function transferFrom(address from, address to, uint256 amount) returns (bool)",
-];
+// ─── Operator setup (one-time per user) ────────────────────────
 
-export async function getCWETH(withSigner = false) {
-  if (!CWETH_ADDRESS) throw new Error("cWETH contract address not configured");
-  if (withSigner) {
-    const signer = await getSigner();
-    return new Contract(CWETH_ADDRESS, CONFIDENTIAL_TOKEN_ABI, signer);
+export async function needsOperatorSetup(): Promise<boolean> {
+  if (!CONTRACT_ADDRESS || !CWETH_ADDRESS || !CUSDC_ADDRESS) return false;
+  const account = getAccount(config);
+  if (!account.address) return false;
+  const address = account.address;
+  const [cwethOk, cusdcOk] = await Promise.all([
+    cwethRead<boolean>("isOperator", [address, CONTRACT_ADDRESS]),
+    cusdcRead<boolean>("isOperator", [address, CONTRACT_ADDRESS]),
+  ]);
+  return !cwethOk || !cusdcOk;
+}
+
+export async function ensureOperatorSet(): Promise<void> {
+  if (!CONTRACT_ADDRESS || !CWETH_ADDRESS || !CUSDC_ADDRESS) return;
+  const account = getAccount(config);
+  if (!account.address) return;
+  const address = account.address;
+  const maxUint48 = 281474976710655n; // type(uint48).max
+
+  const [cwethOk, cusdcOk] = await Promise.all([
+    cwethRead<boolean>("isOperator", [address, CONTRACT_ADDRESS]),
+    cusdcRead<boolean>("isOperator", [address, CONTRACT_ADDRESS]),
+  ]);
+
+  if (!cwethOk) {
+    const hash = await cwethWrite("setOperator", [CONTRACT_ADDRESS, maxUint48]);
+    await waitTx(hash);
   }
-  const provider = getProvider();
-  return new Contract(CWETH_ADDRESS, CONFIDENTIAL_TOKEN_ABI, provider);
-}
-
-export async function getCUSDC(withSigner = false) {
-  if (!CUSDC_ADDRESS) throw new Error("cUSDC contract address not configured");
-  if (withSigner) {
-    const signer = await getSigner();
-    return new Contract(CUSDC_ADDRESS, CONFIDENTIAL_TOKEN_ABI, signer);
+  if (!cusdcOk) {
+    const hash = await cusdcWrite("setOperator", [CONTRACT_ADDRESS, maxUint48]);
+    await waitTx(hash);
   }
-  const provider = getProvider();
-  return new Contract(CUSDC_ADDRESS, CONFIDENTIAL_TOKEN_ABI, provider);
 }
 
-export async function getPendingFillCount(): Promise<number> {
-  const contract = await getContract();
-  return Number(await contract.pendingFillCount());
-}
 
-export async function requestAccess(orderId: number): Promise<void> {
-  const contract = await getContract(true);
-  const tx = await contract.requestAccess(orderId);
-  await tx.wait();
-}
+// ─── Access management ─────────────────────────────────────────
 
 export async function getAccessRequests(orderId: number): Promise<string[]> {
+  const account = getAccount(config).address;
+  if (!account) return [];
   try {
-    const contract = await getContract();
-    return await contract.getAccessRequests(orderId);
+    return await otcRead<string[]>("getAccessRequests", [orderId], account);
   } catch {
     return [];
   }
 }
 
 export async function getGrantedAddresses(orderId: number): Promise<string[]> {
+  const account = getAccount(config).address;
+  if (!account) return [];
   try {
-    const contract = await getContract();
-    return await contract.getGrantedAddresses(orderId);
+    return await otcRead<string[]>("getGrantedAddresses", [orderId], account);
   } catch {
     return [];
   }
 }
 
-export { parseUnits, formatUnits };
+export async function getAccessStatus(orderId: number): Promise<AccessStatus> {
+  const account = getAccount(config).address;
+  if (!account) {
+    return { hasRequested: false, hasAccess: false, isMaker: false };
+  }
+
+  const status = await otcRead<readonly [boolean, boolean, boolean]>("getAccessStatus", [orderId], account);
+  return {
+    hasRequested: status[0],
+    hasAccess: status[1],
+    isMaker: status[2],
+  };
+}
+
+// ─── Pending fill recovery ────────────────────────────────────
+
+export type PendingFillInfo = {
+  pendingFillId: number;
+  orderId: number;
+  txHash: `0x${string}`;
+  blockNumber: bigint;
+};
+
+export function parseFillInitiatedId(logs: readonly { data: `0x${string}`; topics: readonly `0x${string}`[] }[]): bigint {
+  for (const log of logs) {
+    try {
+      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { eventName: string; args: Record<string, unknown> };
+      if (decoded.eventName === "FillInitiated") {
+        return BigInt((decoded.args.pendingFillId ?? decoded.args[0] ?? 0) as string | number | bigint);
+      }
+    } catch { /* not this event */ }
+  }
+  return 0n;
+}
+
+export function parseFillCancelledReason(logs: readonly { data: `0x${string}`; topics: readonly `0x${string}`[] }[]): string | null {
+  for (const log of logs) {
+    try {
+      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { eventName: string; args: Record<string, unknown> };
+      if (decoded.eventName === "FillCancelled") {
+        const r = (decoded.args.reason as string) || "Fill cancelled";
+        if (r === "Price mismatch") return "Fill cancelled: your bid price did not meet the maker's asking price.";
+        if (r === "Zero fill") return "Fill cancelled: no tokens could be matched. Check your balance and fill amount.";
+        return `Fill cancelled: ${r}`;
+      }
+    } catch { /* not this event */ }
+  }
+  return null;
+}
+
+export async function getPendingFillsForOrder(orderId: number): Promise<PendingFillInfo[]> {
+  const client = getPublicClient(config);
+  const initiatedEvent = parseAbiItem("event FillInitiated(uint256 indexed pendingFillId, uint256 indexed orderId)");
+  const settledEvent = parseAbiItem("event FillSettled(uint256 indexed pendingFillId, uint256 indexed orderId)");
+  // Only fetch initiated and settled for this orderId.
+  // FillCancelled has no orderId topic, so we check on-chain status for non-settled IDs instead.
+  const [initiatedLogs, settledLogs] = await Promise.all([
+    client.getLogs({
+      address: CONTRACT_ADDRESS,
+      event: initiatedEvent,
+      args: { orderId: BigInt(orderId) },
+      fromBlock: OTC_DEPLOY_BLOCK,
+      toBlock: "latest",
+    }),
+    client.getLogs({
+      address: CONTRACT_ADDRESS,
+      event: settledEvent,
+      args: { orderId: BigInt(orderId) },
+      fromBlock: OTC_DEPLOY_BLOCK,
+      toBlock: "latest",
+    }),
+  ]);
+
+  const completedIds = new Set<number>();
+  for (const log of settledLogs) {
+    const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { args: Record<string, unknown> };
+    completedIds.add(Number(decoded.args.pendingFillId));
+  }
+
+  // Check on-chain status for remaining IDs instead of scanning all FillCancelled events
+  const initiatedIds = initiatedLogs.map((log) => {
+    const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { args: Record<string, unknown> };
+    return Number(decoded.args.pendingFillId);
+  });
+  const nonSettledIds = initiatedIds.filter((id) => !completedIds.has(id));
+  const pfResults = await Promise.all(
+    nonSettledIds.map((id) => otcRead<readonly [bigint, number, bigint, bigint]>("getPendingFill", [id])),
+  );
+  pfResults.forEach((pf, i) => {
+    if (pf[1] !== 0) completedIds.add(nonSettledIds[i]);
+  });
+
+  return initiatedLogs
+    .map((log) => {
+      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { args: Record<string, unknown> };
+      return {
+        pendingFillId: Number(decoded.args.pendingFillId),
+        orderId: Number(decoded.args.orderId),
+        txHash: log.transactionHash,
+        blockNumber: log.blockNumber,
+      } satisfies PendingFillInfo;
+    })
+    .filter((f) => !completedIds.has(f.pendingFillId));
+}
+
+// ─── Utilities ─────────────────────────────────────────────────
+
+async function fetchPendingUnwrapsForToken(
+  contractAddress: `0x${string}`,
+  abi: Abi,
+  receiver: `0x${string}`,
+  fromBlock: bigint,
+  token: "ETH" | "USDC",
+): Promise<PendingUnwrap[]> {
+  const client = getPublicClient(config);
+  const requestedEvent = parseAbiItem("event UnwrapRequested(address indexed receiver, bytes32 amount)");
+  const finalizedEvent = parseAbiItem("event UnwrapFinalized(address indexed receiver, bytes32 encryptedAmount, uint64 cleartextAmount)");
+
+  const [requestedLogs, finalizedLogs] = await Promise.all([
+    client.getLogs({
+      address: contractAddress,
+      event: requestedEvent,
+      args: { receiver },
+      fromBlock,
+      toBlock: "latest",
+    }),
+    client.getLogs({
+      address: contractAddress,
+      event: finalizedEvent,
+      args: { receiver },
+      fromBlock,
+      toBlock: "latest",
+    }),
+  ]);
+
+  const finalizedHandles = new Set(
+    finalizedLogs.map((log) => {
+      const decoded = decodeEventLog({ abi, data: log.data, topics: log.topics }) as unknown as { args: Record<string, unknown> };
+      return (decoded.args.encryptedAmount as `0x${string}`).toLowerCase();
+    }),
+  );
+
+  return requestedLogs
+    .map((log) => {
+      const decoded = decodeEventLog({ abi, data: log.data, topics: log.topics }) as unknown as { args: Record<string, unknown> };
+      return {
+        token,
+        contractAddress,
+        handle: decoded.args.amount as `0x${string}`,
+        txHash: log.transactionHash,
+        blockNumber: log.blockNumber,
+      } satisfies PendingUnwrap;
+    })
+    .filter((request) => !finalizedHandles.has(request.handle.toLowerCase()));
+}
+
+export async function getPendingUnwraps(receiver: `0x${string}`): Promise<PendingUnwrap[]> {
+  const [cwethResults, cusdcResults] = await Promise.all([
+    CWETH_ADDRESS ? fetchPendingUnwrapsForToken(CWETH_ADDRESS, CWETH_CONTRACT_ABI, receiver, CWETH_DEPLOY_BLOCK, "ETH") : [],
+    CUSDC_ADDRESS ? fetchPendingUnwrapsForToken(CUSDC_ADDRESS, CUSDC_CONTRACT_ABI, receiver, CUSDC_DEPLOY_BLOCK, "USDC") : [],
+  ]);
+
+  return [...cwethResults, ...cusdcResults].sort((a, b) => Number(b.blockNumber - a.blockNumber));
+}
+
+export async function getWalletClientInstance() {
+  return getWalletClient(config);
+}
+
+export { parseUnits, formatUnits, getAddress };
+export { config };

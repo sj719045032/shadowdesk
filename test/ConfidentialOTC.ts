@@ -98,7 +98,7 @@ describe("ConfidentialWETH - ERC7984 Wrap/Unwrap", function () {
 
     const unwrapAmount = ethers.parseEther("1.0");
     // unwrap now emits UnwrapRequested (two-phase: needs finalizeUnwrap for ETH transfer)
-    await expect(cWeth.connect(signers.alice).unwrap(unwrapAmount))
+    await expect(cWeth.connect(signers.alice)["unwrap(uint256)"](unwrapAmount))
       .to.emit(cWeth, "UnwrapRequested");
   });
 
@@ -399,12 +399,12 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
 
       await expect(tx)
         .to.emit(otc, "OrderCreated")
-        .withArgs(0, signers.alice.address, "ETH/USDC", false, baseDeposit, 0);
+        .withArgs(0, "ETH/USDC", false, baseDeposit, 0);
 
       expect(await otc.orderCount()).to.eq(1);
 
       const order = await otc.getOrder(0);
-      expect(order.maker).to.eq(signers.alice.address);
+      expect(await otc.connect(signers.alice).isMaker(0)).to.eq(true);
       expect(order.tokenPair).to.eq("ETH/USDC");
       expect(order.isBuy).to.eq(false);
       expect(order.status).to.eq(0); // Open
@@ -494,12 +494,12 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
 
       await expect(tx)
         .to.emit(otc, "OrderCreated")
-        .withArgs(0, signers.alice.address, "ETH/USDC", true, 0, quoteDeposit);
+        .withArgs(0, "ETH/USDC", true, 0, quoteDeposit);
 
       expect(await otc.orderCount()).to.eq(1);
 
       const order = await otc.getOrder(0);
-      expect(order.maker).to.eq(signers.alice.address);
+      expect(await otc.connect(signers.alice).isMaker(0)).to.eq(true);
       expect(order.isBuy).to.eq(true);
       expect(order.status).to.eq(0); // Open
       expect(order.baseDeposit).to.eq(0);
@@ -725,13 +725,12 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
 
       await expect(initTx)
         .to.emit(otc, "FillInitiated")
-        .withArgs(0, 0, signers.bob.address);
+        .withArgs(0, 0);
 
       // Pending fill should be created
       expect(await otc.pendingFillCount()).to.eq(1);
       const pf = await otc.getPendingFill(0);
       expect(pf.orderId).to.eq(0);
-      expect(pf.taker).to.eq(signers.bob.address);
       expect(pf.status).to.eq(0); // Pending
       expect(pf.takerBaseAmount).to.eq(takerBaseAmount);
       expect(pf.takerQuoteAmount).to.eq(takerQuoteAmount);
@@ -1915,9 +1914,7 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
           )
       ).wait();
 
-      await expect(otc.connect(signers.alice).grantAccess(0, signers.carol.address))
-        .to.emit(otc, "AccessGranted")
-        .withArgs(0, signers.carol.address);
+      await (await otc.connect(signers.alice).grantAccess(0, signers.carol.address)).wait();
 
       // Carol can now decrypt
       const encPrice = await otc.getPrice(0);
@@ -2020,11 +2017,9 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
           )
       ).wait();
 
-      await expect(otc.connect(signers.bob).requestAccess(0))
-        .to.emit(otc, "AccessRequested")
-        .withArgs(0, signers.bob.address);
+      await (await otc.connect(signers.bob).requestAccess(0)).wait();
 
-      const requests = await otc.getAccessRequests(0);
+      const requests = await otc.connect(signers.alice).getAccessRequests(0);
       expect(requests.length).to.eq(1);
       expect(requests[0]).to.eq(signers.bob.address);
     });
@@ -2143,7 +2138,7 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
       await (await otc.connect(signers.alice).grantAccess(0, signers.bob.address)).wait();
       await (await otc.connect(signers.alice).grantAccess(0, signers.carol.address)).wait();
 
-      const granted = await otc.getGrantedAddresses(0);
+      const granted = await otc.connect(signers.alice).getGrantedAddresses(0);
       expect(granted.length).to.eq(2);
       expect(granted[0]).to.eq(signers.bob.address);
       expect(granted[1]).to.eq(signers.carol.address);
@@ -2178,7 +2173,7 @@ describe("ConfidentialOTC - Confidential Dark Pool (cWETH/cUSDC Swaps)", functio
       await (await otc.connect(signers.alice).grantAccess(0, signers.bob.address)).wait();
       await (await otc.connect(signers.alice).grantAccess(0, signers.bob.address)).wait();
 
-      const granted = await otc.getGrantedAddresses(0);
+      const granted = await otc.connect(signers.alice).getGrantedAddresses(0);
       expect(granted.length).to.eq(1);
       expect(granted[0]).to.eq(signers.bob.address);
     });

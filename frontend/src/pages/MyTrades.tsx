@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { fetchAllOrders, type OrderData, getContract, CONTRACT_ADDRESS, fetchMyFillIds, fetchFillDetail, formatUnits } from "../lib/contract";
+import { fetchAllOrders, type OrderData, fetchMyFillIds, fetchFillDetail, checkIsMaker, otcWrite, waitTx } from "../lib/contract";
 import { useWallet } from "../App";
-import { decryptValues, unscaleFromFHE } from "../lib/fhevm";
+import { decryptOrderPriceAmount } from "../lib/fhevm";
 import TransactionModal, { type Step } from "../components/TransactionModal";
 
 type DecryptedOrder = OrderData & {
@@ -10,6 +10,7 @@ type DecryptedOrder = OrderData & {
   decryptedAmount?: number;
   decrypting?: boolean;
   justDecrypted?: boolean;
+  isMakerRole?: boolean;
 };
 
 export default function MyTrades() {
@@ -52,38 +53,27 @@ export default function MyTrades() {
     try {
       setLoading(true);
       const all = await fetchAllOrders();
-      const makerOrders = all.filter(
-        (o) => o.maker.toLowerCase() === account.toLowerCase(),
-      );
+
+      // Check which orders I'm the maker for
+      const makerChecks = await Promise.all(all.map((o) => checkIsMaker(o.id).catch(() => false)));
+      const makerOrders = all.filter((_, i) => makerChecks[i]).map((o) => ({ ...o, isMakerRole: true }));
+      const makerOrderIds = new Set(makerOrders.map((o) => o.id));
 
       // Also fetch orders where user is a taker (via fills)
-      let takerOrders: OrderData[] = [];
+      const takerOrders: DecryptedOrder[] = [];
       try {
         const fillIds = await fetchMyFillIds();
-        const seenOrderIds = new Set(makerOrders.map((o) => o.id));
+        const details = await Promise.all(fillIds.map((fid) => fetchFillDetail(fid)));
         const takerOrderIds = new Set<number>();
-        for (const fid of fillIds) {
-          const detail = await fetchFillDetail(fid);
-          if (!seenOrderIds.has(detail.orderId) && !takerOrderIds.has(detail.orderId)) {
+        for (const detail of details) {
+          if (!makerOrderIds.has(detail.orderId) && !takerOrderIds.has(detail.orderId)) {
             takerOrderIds.add(detail.orderId);
           }
         }
         if (takerOrderIds.size > 0) {
-          const contract = await getContract();
           for (const oid of takerOrderIds) {
-            const o = await contract.getOrder(oid);
-            takerOrders.push({
-              id: oid,
-              maker: o.maker ?? o[0],
-              tokenPair: o.tokenPair ?? o[1],
-              isBuy: o.isBuy ?? o[2],
-              status: Number(o.status ?? o[3]),
-              createdAt: Number(o.createdAt ?? o[4]),
-              baseDeposit: formatUnits(o.baseDeposit ?? o[5] ?? 0n, 18),
-              quoteDeposit: formatUnits(o.quoteDeposit ?? o[6] ?? 0n, 6),
-              baseRemaining: formatUnits(o.baseRemaining ?? o[7] ?? 0n, 18),
-              quoteRemaining: formatUnits(o.quoteRemaining ?? o[8] ?? 0n, 6),
-            });
+            const found = all.find((o) => o.id === oid);
+            if (found) takerOrders.push({ ...found, isMakerRole: false });
           }
         }
       } catch {
@@ -101,51 +91,26 @@ export default function MyTrades() {
   }
 
   async function handleDecrypt(orderId: number) {
-    const steps: Step[] = [
-      { label: "Generating keypair", status: "pending" },
-      { label: "Signing request", status: "pending" },
-      { label: "Decrypting via KMS", status: "pending" },
-    ];
-    openTxModal("Decrypting Order #" + orderId, steps);
-
     try {
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId ? { ...o, decrypting: true } : o)),
       );
 
-      updateTxStep(0, "active");
-      const contract = await getContract();
-      const encPrice = await contract.getPrice(orderId);
-      const encAmount = await contract.getAmount(orderId);
-      updateTxStep(0, "done");
-
-      updateTxStep(1, "active");
-      const results = await decryptValues(
-        [
-          { handle: encPrice.toString(), contractAddress: CONTRACT_ADDRESS },
-          { handle: encAmount.toString(), contractAddress: CONTRACT_ADDRESS },
-        ],
-        account,
-      );
-      updateTxStep(1, "done");
-
-      updateTxStep(2, "active");
-      const values = [...results.values()];
+      const { price, amount } = await decryptOrderPriceAmount(orderId, account);
 
       setOrders((prev) =>
         prev.map((o) =>
           o.id === orderId
             ? {
                 ...o,
-                decryptedPrice: unscaleFromFHE(Number(values[0] || 0n)),
-                decryptedAmount: unscaleFromFHE(Number(values[1] || 0n)),
+                decryptedPrice: price,
+                decryptedAmount: amount,
                 decrypting: false,
                 justDecrypted: true,
               }
             : o,
         ),
       );
-      updateTxStep(2, "done");
 
       // Remove the animation flag after it plays
       setTimeout(() => {
@@ -157,7 +122,6 @@ export default function MyTrades() {
       }, 700);
     } catch (err) {
       console.error("Decrypt failed:", err);
-      failTxModal("Decrypt failed. You may not have access to this order.");
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId ? { ...o, decrypting: false } : o)),
       );
@@ -178,12 +142,11 @@ export default function MyTrades() {
       setGrantingAccess(oid);
 
       updateTxStep(0, "active");
-      const contract = await getContract(true);
-      const tx = await contract.grantAccess(oid, grantModal.address);
+      const hash = await otcWrite("grantAccess", [oid, grantModal.address]);
       updateTxStep(0, "done");
 
       updateTxStep(1, "active");
-      await tx.wait();
+      await waitTx(hash);
       updateTxStep(1, "done");
 
       setGrantSuccess(oid);
@@ -365,7 +328,7 @@ export default function MyTrades() {
             </thead>
             <tbody>
               {orders.map((o, idx) => {
-                const isMaker = o.maker.toLowerCase() === account.toLowerCase();
+                const isMaker = o.isMakerRole ?? false;
                 return (
                   <tr key={o.id} onClick={() => navigate('/order/' + o.id)} className={`border-t border-[#1e293b]/60 hover:bg-blue-500/[0.03] transition-colors row-enter cursor-pointer`} style={{ animationDelay: `${idx * 50}ms` }}>
                     <td className="px-4 py-3.5 font-mono text-xs text-slate-500">#{o.id}</td>
@@ -408,7 +371,7 @@ export default function MyTrades() {
                         {o.decryptedPrice === undefined && (
                           <button onClick={(e) => { e.stopPropagation(); handleDecrypt(o.id); }} disabled={o.decrypting}
                             className="text-[11px] px-2.5 py-1 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 rounded-lg transition cursor-pointer disabled:opacity-50">
-                            {o.decrypting ? "..." : "Decrypt"}
+                            {o.decrypting ? "Decrypting..." : "Decrypt"}
                           </button>
                         )}
                         {isMaker && o.status === 0 && (

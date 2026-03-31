@@ -1,58 +1,25 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { fetchAllOrders, type OrderData, getContract, CONTRACT_ADDRESS, approveCUSDC, approveCWETH, parseUnits } from "../lib/contract";
+import { fetchAllOrders, type OrderData, checkIsMaker } from "../lib/contract";
 import { useWallet } from "../App";
-import { encryptInputs, decryptValues, unscaleFromFHE } from "../lib/fhevm";
-import TransactionModal, { type Step } from "../components/TransactionModal";
 
 const STATUS_LABELS = ["Open", "Filled", "Cancelled"];
 
 type FilterSide = "all" | "buy" | "sell";
 type FilterStatus = "all" | "0" | "1" | "2";
 
-type FillingOrder = OrderData & {
-  // Decrypted maker terms (null until decrypt succeeds)
-  makerPrice: number | null;
-  makerAmount: number | null;
-  decrypting: boolean;
-  decryptError: string;
-  // Taker's fill input
-  fillAmount: string;
+type DisplayOrder = OrderData & {
+  isMakerRole?: boolean;
 };
 
 export default function OrderBook() {
-  const { account, connect } = useWallet();
-  const [orders, setOrders] = useState<OrderData[]>([]);
+  const { account } = useWallet();
+  const [orders, setOrders] = useState<DisplayOrder[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filling, setFilling] = useState<number | null>(null);
-  const [fillingOrder, setFillingOrder] = useState<FillingOrder | null>(null);
-  const [fillError, setFillError] = useState("");
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
   const highlightOrderId = searchParams.get("order");
   const orderRefs = useRef<Record<number, HTMLElement | null>>({});
-
-  // Transaction modal state
-  const [txModalOpen, setTxModalOpen] = useState(false);
-  const [txModalTitle, setTxModalTitle] = useState("");
-  const [txSteps, setTxSteps] = useState<Step[]>([]);
-  const [txError, setTxError] = useState("");
-
-  function openTxModal(title: string, steps: Step[]) {
-    setTxModalTitle(title);
-    setTxSteps(steps);
-    setTxError("");
-    setTxModalOpen(true);
-  }
-
-  function updateTxStep(idx: number, status: Step["status"]) {
-    setTxSteps((prev) => prev.map((s, i) => i === idx ? { ...s, status } : s));
-  }
-
-  function failTxModal(msg: string) {
-    setTxError(msg);
-    setTxSteps((prev) => prev.map((s) => s.status === "active" ? { ...s, status: "error" } : s));
-  }
 
   // Filters
   const [filterPair, setFilterPair] = useState("all");
@@ -61,7 +28,7 @@ export default function OrderBook() {
 
   useEffect(() => {
     loadOrders();
-  }, []);
+  }, [account]);
 
   // Scroll to highlighted order
   useEffect(() => {
@@ -80,179 +47,19 @@ export default function OrderBook() {
     try {
       setLoading(true);
       const data = await fetchAllOrders();
-      setOrders(data.reverse());
+      const reversed = data.reverse();
+
+      if (!account) {
+        setOrders(reversed);
+        return;
+      }
+
+      const makerChecks = await Promise.all(reversed.map((o) => checkIsMaker(o.id).catch(() => false)));
+      setOrders(reversed.map((o, index) => ({ ...o, isMakerRole: makerChecks[index] })));
     } catch {
       // contract not deployed or no wallet
     } finally {
       setLoading(false);
-    }
-  }
-
-  function openFillDialog(order: OrderData) {
-    setFillError("");
-    setFillingOrder({
-      ...order,
-      makerPrice: null,
-      makerAmount: null,
-      decrypting: false,
-      decryptError: "",
-      fillAmount: "",
-    });
-  }
-
-  async function handleDecryptOrder() {
-    if (!fillingOrder || !account) return;
-    try {
-      setFillingOrder((prev) => prev ? { ...prev, decrypting: true, decryptError: "" } : prev);
-      const contract = await getContract();
-      const encPrice = await contract.getPrice(fillingOrder.id);
-      const encAmount = await contract.getAmount(fillingOrder.id);
-      const results = await decryptValues(
-        [
-          { handle: encPrice.toString(), contractAddress: CONTRACT_ADDRESS },
-          { handle: encAmount.toString(), contractAddress: CONTRACT_ADDRESS },
-        ],
-        account,
-      );
-      const values = [...results.values()];
-      const price = unscaleFromFHE(Number(values[0] || 0n));
-      const amount = unscaleFromFHE(Number(values[1] || 0n));
-      setFillingOrder((prev) => prev ? { ...prev, makerPrice: price, makerAmount: amount, fillAmount: String(amount), decrypting: false } : prev);
-    } catch (err) {
-      console.error("Decrypt failed:", err);
-      setFillingOrder((prev) => prev ? { ...prev, decrypting: false, decryptError: "Access denied. Ask the maker to grant you access first." } : prev);
-    }
-  }
-
-  async function handleFillSubmit() {
-    if (!fillingOrder || !account || !fillingOrder.makerPrice || !fillingOrder.fillAmount) return;
-
-    const fillAmt = Number(fillingOrder.fillAmount);
-    const price = fillingOrder.makerPrice;
-    if (!fillAmt || !price) {
-      setFillError("Fill amount must be greater than 0");
-      return;
-    }
-
-    const isSellOrder = !fillingOrder.isBuy;
-    const steps: Step[] = isSellOrder
-      ? [
-          { label: "Encrypting bid", status: "pending" },
-          { label: "Approving cUSDC", status: "pending" },
-          { label: "Initiating fill (FHE matching)", status: "pending" },
-          { label: "Waiting for TX1 confirmation", status: "pending" },
-          { label: "Decrypting match result", status: "pending" },
-          { label: "Settling fill", status: "pending" },
-          { label: "Waiting for TX2 confirmation", status: "pending" },
-        ]
-      : [
-          { label: "Encrypting bid", status: "pending" },
-          { label: "Approving cWETH", status: "pending" },
-          { label: "Initiating fill (FHE matching)", status: "pending" },
-          { label: "Waiting for TX1 confirmation", status: "pending" },
-          { label: "Decrypting match result", status: "pending" },
-          { label: "Settling fill", status: "pending" },
-          { label: "Waiting for TX2 confirmation", status: "pending" },
-        ];
-    openTxModal("Filling Order", steps);
-
-    try {
-      setFilling(fillingOrder.id);
-      setFillError("");
-      let stepIdx = 0;
-
-      // Step 1: Encrypting bid
-      updateTxStep(stepIdx, "active");
-      const encrypted = await encryptInputs(account, price, fillAmt);
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      const contract = await getContract(true);
-
-      let ethAmt: string;
-      let usdcAmt: string;
-
-      if (fillingOrder.isBuy) {
-        // Fill BUY order: taker pays cWETH, receives cUSDC
-        ethAmt = String(fillAmt);
-        usdcAmt = String(fillAmt * price);
-
-        // Step 2: Approving cWETH
-        updateTxStep(stepIdx, "active");
-        await approveCWETH(ethAmt);
-        updateTxStep(stepIdx, "done");
-        stepIdx++;
-      } else {
-        // Fill SELL order: taker pays cUSDC, receives cWETH
-        ethAmt = String(fillAmt);
-        usdcAmt = String(fillAmt * price);
-
-        // Step 2: Approving cUSDC
-        updateTxStep(stepIdx, "active");
-        if (Number(usdcAmt) > 0) {
-          await approveCUSDC(usdcAmt);
-        }
-        updateTxStep(stepIdx, "done");
-        stepIdx++;
-      }
-
-      // Step 3: Initiating fill (FHE matching)
-      updateTxStep(stepIdx, "active");
-      const tx1 = await contract.initiateFill(
-        fillingOrder.id,
-        encrypted.handles[0], encrypted.inputProof,
-        encrypted.handles[1], encrypted.inputProof,
-        parseUnits(ethAmt, 18),
-        parseUnits(usdcAmt, 6),
-      );
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      // Step 4: Waiting for TX1 confirmation
-      updateTxStep(stepIdx, "active");
-      const receipt = await tx1.wait();
-      // Parse pendingFillId from FillInitiated event
-      const iface = contract.interface;
-      const fillInitiatedTopic = iface.getEvent("FillInitiated")!.topicHash;
-      const eventLog = receipt.logs.find((log: { topics: string[] }) => log.topics[0] === fillInitiatedTopic);
-      const pendingFillId = eventLog ? BigInt(eventLog.topics[2]) : 0n;
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      // Step 5: Decrypting match result
-      // In demo/mock mode the contract accepts empty proofs.
-      // Full production flow would call publicDecrypt via the gateway relayer here.
-      updateTxStep(stepIdx, "active");
-      // Brief pause to simulate decryption relay
-      await new Promise((r) => setTimeout(r, 1000));
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      // Step 6: Settling fill
-      updateTxStep(stepIdx, "active");
-      const tx2 = await contract.settleFill(
-        pendingFillId,
-        [],    // handles (empty for demo/mock mode)
-        "0x",  // cleartexts
-        "0x",  // proof
-      );
-      updateTxStep(stepIdx, "done");
-      stepIdx++;
-
-      // Step 7: Waiting for TX2 confirmation
-      updateTxStep(stepIdx, "active");
-      await tx2.wait();
-      updateTxStep(stepIdx, "done");
-
-      setFillingOrder(null);
-      await loadOrders();
-    } catch (err) {
-      console.error("Fill failed:", err);
-      const msg = (err as Error).message?.slice(0, 120) || "Transaction failed";
-      setFillError(msg);
-      failTxModal(msg);
-    } finally {
-      setFilling(null);
     }
   }
 
@@ -274,214 +81,6 @@ export default function OrderBook() {
 
   return (
     <div>
-      {/* Fill Order Modal */}
-      {fillingOrder && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          onClick={(e) => { if (e.target === e.currentTarget && filling === null) setFillingOrder(null); }}
-        >
-          {/* Backdrop */}
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-
-          {/* Modal */}
-          <div className="relative w-full max-w-md bg-[#111827] border border-[#1e293b] rounded-2xl shadow-2xl shadow-black/50 overflow-hidden gradient-border">
-            {/* Header */}
-            <div className="px-6 pt-6 pb-4">
-              <div className="flex items-center justify-between mb-1">
-                <h3 className="text-lg font-bold text-white">
-                  Fill Order #{fillingOrder.id}
-                </h3>
-                <button
-                  onClick={() => filling === null && setFillingOrder(null)}
-                  className="text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-                >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                  </svg>
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded ${
-                  fillingOrder.isBuy
-                    ? "bg-emerald-500/10 text-emerald-400"
-                    : "bg-red-500/10 text-red-400"
-                }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${fillingOrder.isBuy ? "bg-emerald-400" : "bg-red-400"}`} />
-                  {fillingOrder.isBuy ? "BUY" : "SELL"}
-                </span>
-                <span className="text-sm text-slate-400">{fillingOrder.tokenPair}</span>
-              </div>
-            </div>
-
-            {/* Form */}
-            <div className="px-6 pb-6 space-y-4">
-              {/* Step 1: Decrypt order details */}
-              {fillingOrder.makerPrice === null ? (
-                <div className="space-y-4">
-                  <div className="bg-[#0d1117] border border-[#1e293b] rounded-xl p-4 text-center">
-                    <div className="text-3xl mb-2">🔒</div>
-                    <div className="text-sm text-slate-300 mb-1">Order details are encrypted</div>
-                    <div className="text-xs text-slate-500">Decrypt to see price and amount before filling</div>
-                  </div>
-
-                  {fillingOrder.decryptError && (
-                    <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-sm text-red-400 flex items-start gap-2">
-                      <span className="text-lg">🚫</span>
-                      <div>
-                        <div className="font-medium">Access Denied</div>
-                        <div className="text-xs text-red-400/70 mt-0.5">Ask the maker to grant you access via "Grant Access" in their My Trades page.</div>
-                      </div>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={handleDecryptOrder}
-                    disabled={fillingOrder.decrypting}
-                    className="w-full bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 hover:border-blue-500/40 text-blue-400 py-3 rounded-xl text-sm font-medium transition-all duration-200 cursor-pointer disabled:opacity-50"
-                  >
-                    {fillingOrder.decrypting ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <span className="w-4 h-4 border-2 border-blue-400/30 border-t-blue-400 rounded-full spinner" />
-                        Decrypting...
-                      </span>
-                    ) : "🔓 Decrypt Order Details"}
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {/* Decrypted maker terms */}
-                  <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4">
-                    <div className="text-xs text-emerald-400/80 uppercase tracking-wider font-medium mb-3">Maker's Terms (Decrypted)</div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <div className="text-[10px] text-slate-500 mb-0.5">Price</div>
-                        <div className="text-lg font-bold text-white">${fillingOrder.makerPrice.toLocaleString()}</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-slate-500 mb-0.5">Amount</div>
-                        <div className="text-lg font-bold text-white">{fillingOrder.makerAmount} {fillingOrder.tokenPair.split("/")[0]}</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Fill amount */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">
-                      Fill Amount ({fillingOrder.tokenPair.split("/")[0]})
-                    </label>
-                    <input
-                      type="number"
-                      value={fillingOrder.fillAmount}
-                      onChange={(e) => setFillingOrder({ ...fillingOrder, fillAmount: e.target.value })}
-                      placeholder="0"
-                      min="0.000001"
-                      step="any"
-                      max={fillingOrder.makerAmount || undefined}
-                      className="w-full bg-[#0d1117] border border-[#1e293b] rounded-xl px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50 transition-all duration-200"
-                    />
-                  </div>
-
-                  {/* Auto-calculated summary */}
-                  {Number(fillingOrder.fillAmount) > 0 && (
-                    <div className="bg-[#0d1117] border border-[#1e293b] rounded-xl p-4 space-y-2">
-                      <div className="text-xs text-slate-500 uppercase tracking-wider font-medium mb-2">Settlement Preview</div>
-                      {fillingOrder.isBuy ? (
-                        <>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-slate-400">You pay</span>
-                            <span className="text-red-400 font-medium">{Number(fillingOrder.fillAmount).toLocaleString()} ETH</span>
-                          </div>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-slate-400">You receive</span>
-                            <span className="text-emerald-400 font-medium">{(Number(fillingOrder.fillAmount) * fillingOrder.makerPrice).toLocaleString()} USDC</span>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-slate-400">You pay</span>
-                            <span className="text-red-400 font-medium">{(Number(fillingOrder.fillAmount) * fillingOrder.makerPrice).toLocaleString()} USDC</span>
-                          </div>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-slate-400">You receive</span>
-                            <span className="text-emerald-400 font-medium">{Number(fillingOrder.fillAmount).toLocaleString()} ETH</span>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  {/* FHE info */}
-                  <div className="flex items-start gap-2.5 bg-blue-500/5 border border-blue-500/10 rounded-lg p-3">
-                    <svg className="mt-0.5 flex-shrink-0" width="14" height="14" viewBox="0 0 32 32" fill="none">
-                      <path d="M16 2L4 8v8c0 7.18 5.12 13.9 12 16 6.88-2.1 12-8.82 12-16V8L16 2z" fill="#3b82f6" fillOpacity="0.2" stroke="#3b82f6" strokeWidth="1.5"/>
-                      <path d="M12 16l3 3 5-6" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    <span className="text-xs text-blue-300/70 leading-relaxed">
-                      Your bid will be encrypted with FHE. The contract verifies price match on encrypted data.
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Error */}
-              {fillError && (
-                <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3 flex items-center gap-2">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
-                  {fillError}
-                </div>
-              )}
-
-              {/* Submit button - only shown after decrypt */}
-              {fillingOrder.makerPrice !== null && (
-              <button
-                onClick={async () => {
-                  if (!account) { await connect(); return; }
-                  handleFillSubmit();
-                }}
-                disabled={filling === fillingOrder.id || !fillingOrder.fillAmount || Number(fillingOrder.fillAmount) <= 0}
-                className={`w-full py-3.5 rounded-xl font-semibold transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-                  fillingOrder.isBuy
-                    ? "bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white shadow-[0_0_20px_rgba(239,68,68,0.2)]"
-                    : "bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-[0_0_20px_rgba(34,197,94,0.2)]"
-                }`}
-              >
-                {filling === fillingOrder.id ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full spinner" />
-                    Processing fill...
-                  </span>
-                ) : fillingOrder.isBuy ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
-                    </svg>
-                    Approve cWETH & Fill
-                  </span>
-                ) : (
-                  <span className="flex items-center justify-center gap-2">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
-                    </svg>
-                    Approve cUSDC & Fill
-                  </span>
-                )}
-              </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Transaction Modal */}
-      <TransactionModal
-        open={txModalOpen}
-        title={txModalTitle}
-        steps={txSteps}
-        error={txError}
-        onClose={() => { setTxModalOpen(false); setTxError(""); }}
-      />
-
       {/* Hero Banner */}
       <div className="relative overflow-hidden rounded-2xl mb-8 gradient-border">
         {/* Background layers */}
@@ -682,17 +281,13 @@ export default function OrderBook() {
                         {new Date(o.createdAt * 1000).toLocaleString()}
                       </td>
                       <td className="px-4 py-3.5 text-right">
-                        {o.status === 0 && account?.toLowerCase() !== o.maker.toLowerCase() ? (
-                          <button
-                            onClick={() => {
-                              if (!account) { connect(); return; }
-                              openFillDialog(o);
-                            }}
-                            className="bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/30 hover:border-blue-500/50 text-blue-400 text-xs font-medium px-4 py-1.5 rounded-lg transition-all duration-200 cursor-pointer hover:shadow-[0_0_12px_rgba(59,130,246,0.2)]"
-                          >
-                            Fill Order
-                          </button>
-                        ) : null}
+                        {o.isMakerRole ? (
+                          <span className="text-purple-400 text-xs font-medium">My Order →</span>
+                        ) : o.status === 0 ? (
+                          <span className="text-emerald-400 text-xs font-medium">Fill Order →</span>
+                        ) : (
+                          <span className="text-slate-500 text-xs font-medium">View →</span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -744,17 +339,6 @@ export default function OrderBook() {
                 <div className="text-xs text-slate-500">
                   {new Date(o.createdAt * 1000).toLocaleDateString()}
                 </div>
-                {o.status === 0 && account?.toLowerCase() !== o.maker.toLowerCase() && (
-                  <button
-                    onClick={() => {
-                      if (!account) { connect(); return; }
-                      openFillDialog(o);
-                    }}
-                    className="mt-3 w-full bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/25 text-blue-400 text-xs font-medium py-2 rounded-lg transition-all cursor-pointer"
-                  >
-                    Fill Order
-                  </button>
-                )}
               </div>
             ))}
           </div>

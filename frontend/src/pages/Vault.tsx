@@ -1,16 +1,27 @@
 import { useState, useEffect, useCallback } from "react";
 import {
-  getProvider,
   getETHBalance,
   getUSDCBalance,
-  getCWETH,
-  getCUSDC,
   CWETH_ADDRESS,
   CUSDC_ADDRESS,
-  getUSDC,
   parseUnits,
+  cwethRead,
+  cusdcRead,
+  cwethWrite,
+  cusdcWrite,
+  usdcApprove,
+  usdcAllowance,
+  waitTx,
+  getPendingUnwraps,
+  type PendingUnwrap,
+  ZERO_FHE_HANDLE,
 } from "../lib/contract";
-import { decryptValues } from "../lib/fhevm";
+import { getAccount } from "@wagmi/core";
+import { decodeEventLog, type Abi } from "viem";
+import { config } from "../wagmi";
+import CWETH_ABI from "../lib/cweth-abi.json";
+import CUSDC_ABI from "../lib/cusdc-abi.json";
+import { decryptValues, encryptUint64, publicDecryptHandle } from "../lib/fhevm";
 import { useWallet } from "../App";
 import TransactionModal, { type Step } from "../components/TransactionModal";
 
@@ -90,7 +101,7 @@ function VaultCard({
             {plaintextLoading ? (
               <span className="text-slate-500">Loading...</span>
             ) : (
-              `${Number(plaintextBalance).toFixed(symbol === "ETH" ? 4 : 2)} ${symbol}`
+              `${parseFloat(Number(plaintextBalance).toFixed(symbol === "ETH" ? 6 : 2))} ${symbol}`
             )}
           </span>
         </div>
@@ -104,7 +115,7 @@ function VaultCard({
             <span className="text-xs text-slate-600">--</span>
           ) : decryptedBalance !== null ? (
             <span className="text-sm font-mono text-emerald-400 decrypt-reveal">
-              {Number(decryptedBalance).toFixed(symbol === "ETH" ? 4 : 2)} c{symbol}
+              {parseFloat(Number(decryptedBalance).toFixed(symbol === "ETH" ? 8 : 6))} c{symbol}
             </span>
           ) : (
             <div className="flex items-center gap-2">
@@ -173,7 +184,7 @@ function VaultCard({
             onClick={() => setAmount(plaintextBalance)}
             className="text-xs text-blue-400 hover:text-blue-300 transition-colors cursor-pointer"
           >
-            Max: {Number(plaintextBalance).toFixed(symbol === "ETH" ? 4 : 2)} {symbol}
+            Max: {parseFloat(Number(plaintextBalance).toFixed(symbol === "ETH" ? 6 : 2))} {symbol}
           </button>
         )}
 
@@ -229,6 +240,98 @@ function VaultCard({
   );
 }
 
+type PendingUnwrapStatus = "requested" | "decrypting" | "ready" | "finalizing" | "error";
+
+type PendingUnwrapItem = PendingUnwrap & {
+  status: PendingUnwrapStatus;
+  cleartext?: bigint;
+  cleartexts?: `0x${string}`;
+  decryptionProof?: `0x${string}`;
+  error?: string;
+  autoResume?: boolean;
+};
+
+const CWETH_ABI_TYPED = CWETH_ABI as Abi;
+const CUSDC_ABI_TYPED = CUSDC_ABI as Abi;
+
+function shortenHash(value: string) {
+  return `${value.slice(0, 10)}…${value.slice(-6)}`;
+}
+
+function formatPendingAmount(item: PendingUnwrapItem) {
+  if (item.cleartext === undefined) return null;
+  // Both cWETH and cUSDC encrypted balances use 6-decimal precision
+  const divisor = 1e6;
+  const digits = item.token === "ETH" ? 6 : 2;
+  return `${parseFloat((Number(item.cleartext) / divisor).toFixed(digits))} ${item.token}`;
+}
+
+function upsertPendingItem(items: PendingUnwrapItem[], next: PendingUnwrapItem) {
+  const existing = items.find((item) => item.handle.toLowerCase() === next.handle.toLowerCase());
+  if (!existing) return [next, ...items];
+  return items.map((item) => item.handle.toLowerCase() === next.handle.toLowerCase() ? { ...item, ...next } : item);
+}
+
+function PendingUnwrapList({
+  title,
+  items,
+  onFinalize,
+}: {
+  title: string;
+  items: PendingUnwrapItem[];
+  onFinalize: (item: PendingUnwrapItem) => void;
+}) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mt-4 bg-[#0d1117] border border-[#1e293b] rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-semibold text-slate-200">Pending unwraps · {title}</h4>
+        <span className="text-xs text-slate-500">Recovered from chain</span>
+      </div>
+      <div className="space-y-3">
+        {items.map((item) => {
+          const canFinalize = item.status === "ready" && item.cleartexts && item.decryptionProof;
+          return (
+            <div key={item.handle} className="rounded-lg border border-[#1f2937] bg-slate-950/60 p-3">
+              {(() => { const fmtAmt = formatPendingAmount(item); return (
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-400">Handle</div>
+                  <div className="text-sm font-mono text-slate-200 truncate">{shortenHash(item.handle)}</div>
+                  <div className="mt-1 text-xs text-slate-500">Tx {shortenHash(item.txHash)}</div>
+                  {fmtAmt && (
+                    <div className="mt-1 text-xs text-emerald-400">{fmtAmt}</div>
+                  )}
+                  {item.error && <div className="mt-1 text-xs text-rose-400">{item.error}</div>}
+                </div>
+                <div className="flex flex-col items-end gap-2">
+                  <span className="text-xs px-2 py-1 rounded-full border border-slate-700 text-slate-300">
+                    {item.status === "requested" && "request submitted"}
+                    {item.status === "decrypting" && "decrypting"}
+                    {item.status === "ready" && "ready to finalize"}
+                    {item.status === "finalizing" && "finalizing"}
+                    {item.status === "error" && "error"}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!canFinalize}
+                    onClick={() => onFinalize(item)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors bg-blue-600 text-white hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    Finalize
+                  </button>
+                </div>
+              </div>
+              ); })()}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Vault Page
 // ---------------------------------------------------------------------------
@@ -257,6 +360,8 @@ export default function Vault() {
   const [txSteps, setTxSteps] = useState<Step[]>([]);
   const [txError, setTxError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [selectedToken, setSelectedToken] = useState<"ETH" | "USDC">("ETH");
+  const [pendingUnwraps, setPendingUnwraps] = useState<PendingUnwrapItem[]>([]);
 
   // ---- Load plaintext balances ----
   const loadBalances = useCallback(async () => {
@@ -279,77 +384,70 @@ export default function Vault() {
   // ---- Load encrypted balance handles ----
   const loadEncryptedHandles = useCallback(async () => {
     if (!account) return;
-    try {
-      if (CWETH_ADDRESS) {
-        const cweth = await getCWETH();
-        const handle = await cweth.balanceOf(account);
-        if (handle && handle !== "0x" + "0".repeat(64)) {
-          setCwethHandle(handle);
-        }
-      }
-    } catch {
-      // Contract may not be deployed yet
+    const [cwethResult, cusdcResult] = await Promise.all([
+      CWETH_ADDRESS ? cwethRead("confidentialBalanceOf", [account]).catch(() => null) : null,
+      CUSDC_ADDRESS ? cusdcRead("confidentialBalanceOf", [account]).catch(() => null) : null,
+    ]);
+    if (cwethResult && cwethResult !== ZERO_FHE_HANDLE) setCwethHandle(cwethResult as string);
+    if (cusdcResult && cusdcResult !== ZERO_FHE_HANDLE) setCusdcHandle(cusdcResult as string);
+  }, [account]);
+
+  const refreshPendingUnwraps = useCallback(async () => {
+    if (!account) {
+      setPendingUnwraps([]);
+      return;
     }
+
     try {
-      if (CUSDC_ADDRESS) {
-        const cusdc = await getCUSDC();
-        const handle = await cusdc.balanceOf(account);
-        if (handle && handle !== "0x" + "0".repeat(64)) {
-          setCusdcHandle(handle);
-        }
-      }
-    } catch {
-      // Contract may not be deployed yet
+      const requests = await getPendingUnwraps(account as `0x${string}`);
+      setPendingUnwraps((prev) => {
+        const finalizing = prev.filter((item) => item.status === "finalizing");
+        const merged = requests.map((request) => {
+          const existing = prev.find((item) => item.handle.toLowerCase() === request.handle.toLowerCase());
+          return existing ? { ...existing, ...request } : { ...request, status: "requested" as const };
+        });
+        const mergedHandles = new Set(merged.map((item) => item.handle.toLowerCase()));
+        const pendingFinalizing = finalizing.filter((item) => !mergedHandles.has(item.handle.toLowerCase()));
+        return [...pendingFinalizing, ...merged];
+      });
+    } catch (err) {
+      console.error("Failed to recover pending unwraps:", err);
     }
   }, [account]);
 
   useEffect(() => {
     loadBalances();
     loadEncryptedHandles();
-  }, [loadBalances, loadEncryptedHandles]);
+    refreshPendingUnwraps();
+  }, [loadBalances, loadEncryptedHandles, refreshPendingUnwraps]);
 
-  // ---- Decrypt helpers ----
-  const handleDecryptCWETH = async () => {
-    if (!account || !cwethHandle) return;
+  // ---- Decrypt all balances in one signing request ----
+  async function handleDecryptAll() {
+    if (!account) return;
+    const handles: { handle: string; contractAddress: string }[] = [];
+    if (cwethHandle) handles.push({ handle: cwethHandle, contractAddress: CWETH_ADDRESS });
+    if (cusdcHandle) handles.push({ handle: cusdcHandle, contractAddress: CUSDC_ADDRESS });
+    if (handles.length === 0) return;
+
     setCwethDecrypting(true);
-    try {
-      const results = await decryptValues(
-        [{ handle: cwethHandle, contractAddress: CWETH_ADDRESS }],
-        account,
-      );
-      const val = results.get(cwethHandle);
-      if (val !== undefined) {
-        // cWETH uses 18 decimals like ETH
-        const formatted = Number(val) / 1e18;
-        setCwethDecrypted(formatted.toString());
-      }
-    } catch (err) {
-      console.error("Failed to decrypt cWETH balance:", err);
-    } finally {
-      setCwethDecrypting(false);
-    }
-  };
-
-  const handleDecryptCUSDC = async () => {
-    if (!account || !cusdcHandle) return;
     setCusdcDecrypting(true);
     try {
-      const results = await decryptValues(
-        [{ handle: cusdcHandle, contractAddress: CUSDC_ADDRESS }],
-        account,
-      );
-      const val = results.get(cusdcHandle);
-      if (val !== undefined) {
-        // cUSDC uses 6 decimals like USDC
-        const formatted = Number(val) / 1e6;
-        setCusdcDecrypted(formatted.toString());
+      const results = await decryptValues(handles, account);
+      if (cwethHandle) {
+        const val = results.get(cwethHandle);
+        setCwethDecrypted(val !== undefined ? String(Number(val) / 1e6) : "0");
+      }
+      if (cusdcHandle) {
+        const val = results.get(cusdcHandle);
+        setCusdcDecrypted(val !== undefined ? String(Number(val) / 1e6) : "0");
       }
     } catch (err) {
-      console.error("Failed to decrypt cUSDC balance:", err);
+      console.error("Failed to decrypt balances:", err);
     } finally {
+      setCwethDecrypting(false);
       setCusdcDecrypting(false);
     }
-  };
+  }
 
   // ---- Step helpers ----
   function updateStep(idx: number, status: Step["status"]) {
@@ -364,6 +462,92 @@ export default function Vault() {
     );
   }
 
+  function parseUnwrapRequestedHandle(receipt: Awaited<ReturnType<typeof waitTx>>, token: "ETH" | "USDC") {
+    const abi = token === "ETH" ? CWETH_ABI_TYPED : CUSDC_ABI_TYPED;
+    for (const log of receipt.logs) {
+      try {
+        const decoded = decodeEventLog({ abi, data: log.data, topics: log.topics }) as unknown as { eventName: string; args: Record<string, unknown> };
+        if (decoded.eventName === "UnwrapRequested") {
+          return decoded.args.amount as `0x${string}`;
+        }
+      } catch {
+        // ignore non-matching logs
+      }
+    }
+    throw new Error("UnwrapRequested event not found");
+  }
+
+  async function runPublicDecrypt(item: PendingUnwrap, autoResume = false) {
+    setPendingUnwraps((prev) => upsertPendingItem(prev, { ...item, status: "decrypting", autoResume }));
+    try {
+      const decrypted = await publicDecryptHandle(item.handle);
+      const nextItem: PendingUnwrapItem = {
+        ...item,
+        status: "ready",
+        cleartext: decrypted.cleartext,
+        cleartexts: decrypted.cleartexts,
+        decryptionProof: decrypted.decryptionProof,
+        autoResume,
+      };
+      setPendingUnwraps((prev) => upsertPendingItem(prev, nextItem));
+      return nextItem;
+    } catch (err) {
+      const message = (err as Error).message?.slice(0, 160) || "Public decrypt failed";
+      setPendingUnwraps((prev) => upsertPendingItem(prev, { ...item, status: "error", error: message, autoResume }));
+      throw err;
+    }
+  }
+
+  async function finalizePendingUnwrap(item: PendingUnwrapItem, options?: { showModal?: boolean }) {
+    if (item.cleartext === undefined || !item.cleartexts || !item.decryptionProof) {
+      throw new Error("Missing decryption result");
+    }
+
+    const showModal = options?.showModal ?? true;
+    if (showModal) {
+      setTxTitle(`Finalizing c${item.token} unwrap`);
+      setTxSteps([
+        { label: "Submitting finalize transaction", status: "pending" },
+        { label: "Waiting for finalization confirmation", status: "pending" },
+      ]);
+      setTxError("");
+      setTxModalOpen(true);
+    }
+
+    setPendingUnwraps((prev) => upsertPendingItem(prev, { ...item, status: "finalizing" }));
+    setBusy(true);
+
+    try {
+      if (showModal) updateStep(0, "active");
+      const hash = item.token === "ETH"
+        ? await cwethWrite("finalizeUnwrap", [item.handle, item.cleartext, item.decryptionProof])
+        : await cusdcWrite("finalizeUnwrap", [item.handle, item.cleartext, item.decryptionProof]);
+      if (showModal) updateStep(0, "done");
+
+      if (showModal) updateStep(1, "active");
+      await waitTx(hash);
+      if (showModal) updateStep(1, "done");
+
+      setPendingUnwraps((prev) => prev.filter((entry) => entry.handle.toLowerCase() !== item.handle.toLowerCase()));
+      await Promise.all([loadBalances(), loadEncryptedHandles()]);
+      if (item.token === "ETH") {
+        setCwethDecrypted(null);
+      } else {
+        setCusdcDecrypted(null);
+      }
+    } catch (err) {
+      const message = (err as Error).message?.slice(0, 160) || "Finalize unwrap failed";
+      setPendingUnwraps((prev) => upsertPendingItem(prev, { ...item, status: "error", error: message }));
+      if (showModal) {
+        setTxError(message);
+        markActiveAsError();
+      }
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ---- Wrap ETH -> cWETH ----
   const handleWrapETH = async (amount: string) => {
     if (!account) {
@@ -374,7 +558,7 @@ export default function Vault() {
       { label: "Submitting wrap transaction", status: "pending" },
       { label: "Waiting for confirmation", status: "pending" },
     ];
-    setTxTitle("Wrapping ETH -> cWETH");
+    setTxTitle("Wrapping ETH → cWETH");
     setTxSteps(steps);
     setTxError("");
     setTxModalOpen(true);
@@ -382,17 +566,15 @@ export default function Vault() {
 
     try {
       updateStep(0, "active");
-      const cweth = await getCWETH(true);
-      const tx = await cweth["wrap()"]({ value: parseUnits(amount, 18) });
+      const hash = await cwethWrite("wrap", [], parseUnits(amount, 18));
       updateStep(0, "done");
 
       updateStep(1, "active");
-      await tx.wait();
+      await waitTx(hash);
       updateStep(1, "done");
 
       // Refresh balances
-      loadBalances();
-      loadEncryptedHandles();
+      await Promise.all([loadBalances(), loadEncryptedHandles()]);
       setCwethDecrypted(null);
     } catch (err: unknown) {
       console.error(err);
@@ -410,9 +592,21 @@ export default function Vault() {
       await connect();
       return;
     }
+    // Pre-check if decrypted balance is available and insufficient
+    if (cwethDecrypted !== null && Number(amount) > Number(cwethDecrypted)) {
+      setTxTitle("Unwrapping cWETH -> ETH");
+      setTxSteps([{ label: "Balance check", status: "error" }]);
+      setTxError(`Insufficient cWETH balance (have ${parseFloat(Number(cwethDecrypted).toFixed(8))}, need ${amount}).`);
+      setTxModalOpen(true);
+      return;
+    }
     const steps: Step[] = [
+      { label: "Encrypting amount", status: "pending" },
       { label: "Submitting unwrap transaction", status: "pending" },
       { label: "Waiting for confirmation", status: "pending" },
+      { label: "Waiting for decryption result", status: "pending" },
+      { label: "Finalizing unwrap", status: "pending" },
+      { label: "Waiting for finalization confirmation", status: "pending" },
     ];
     setTxTitle("Unwrapping cWETH -> ETH");
     setTxSteps(steps);
@@ -421,17 +615,43 @@ export default function Vault() {
     setBusy(true);
 
     try {
+      // cWETH unwrap with encrypted amount (fully confidential)
+      // unwrap(address from, address to, externalEuint64 encryptedAmount, bytes inputProof)
       updateStep(0, "active");
-      const cweth = await getCWETH(true);
-      const tx = await cweth.unwrap(parseUnits(amount, 18));
+      await new Promise(r => setTimeout(r, 50)); // let React paint modal
+      const encrypted = await encryptUint64(CWETH_ADDRESS, account, parseUnits(amount, 6));
       updateStep(0, "done");
 
       updateStep(1, "active");
-      await tx.wait();
+      const hash = await cwethWrite("unwrap", [account, account, encrypted.handles[0], encrypted.inputProof]);
       updateStep(1, "done");
 
-      loadBalances();
-      loadEncryptedHandles();
+      updateStep(2, "active");
+      const receipt = await waitTx(hash);
+      updateStep(2, "done");
+
+      updateStep(3, "active");
+      const handle = parseUnwrapRequestedHandle(receipt, "ETH");
+      const pending: PendingUnwrap = {
+        token: "ETH",
+        contractAddress: CWETH_ADDRESS,
+        handle,
+        txHash: hash,
+        blockNumber: receipt.blockNumber,
+      };
+      const decrypted = await runPublicDecrypt(pending, true);
+      updateStep(3, "done");
+
+      updateStep(4, "active");
+      const hash2 = await cwethWrite("finalizeUnwrap", [decrypted.handle, decrypted.cleartext!, decrypted.decryptionProof!]);
+      updateStep(4, "done");
+
+      updateStep(5, "active");
+      await waitTx(hash2);
+      updateStep(5, "done");
+
+      setPendingUnwraps((prev) => prev.filter((item) => item.handle.toLowerCase() !== handle.toLowerCase()));
+      await Promise.all([loadBalances(), loadEncryptedHandles(), refreshPendingUnwraps()]);
       setCwethDecrypted(null);
     } catch (err: unknown) {
       console.error(err);
@@ -454,7 +674,7 @@ export default function Vault() {
       { label: "Submitting wrap transaction", status: "pending" },
       { label: "Waiting for confirmation", status: "pending" },
     ];
-    setTxTitle("Wrapping USDC -> cUSDC");
+    setTxTitle("Wrapping USDC → cUSDC");
     setTxSteps(steps);
     setTxError("");
     setTxModalOpen(true);
@@ -463,30 +683,26 @@ export default function Vault() {
     try {
       // Step 1: Approve USDC spending
       updateStep(0, "active");
-      const usdc = await getUSDC(true);
       const needed = parseUnits(amount, 6);
-      const signer = await getProvider().getSigner();
-      const signerAddr = await signer.getAddress();
-      const currentAllowance = await usdc.allowance(signerAddr, CUSDC_ADDRESS);
+      const { address: signerAddr } = getAccount(config);
+      const currentAllowance = await usdcAllowance(signerAddr! as `0x${string}`, CUSDC_ADDRESS);
       if (currentAllowance < needed) {
-        const approveTx = await usdc.approve(CUSDC_ADDRESS, needed);
-        await approveTx.wait();
+        const approveHash = await usdcApprove(CUSDC_ADDRESS, needed);
+        await waitTx(approveHash);
       }
       updateStep(0, "done");
 
       // Step 2: Wrap
       updateStep(1, "active");
-      const cusdc = await getCUSDC(true);
-      const tx = await cusdc["wrap(uint256)"](needed);
+      const wrapHash = await cusdcWrite("wrap", [signerAddr, needed]);
       updateStep(1, "done");
 
       // Step 3: Wait
       updateStep(2, "active");
-      await tx.wait();
+      await waitTx(wrapHash);
       updateStep(2, "done");
 
-      loadBalances();
-      loadEncryptedHandles();
+      await Promise.all([loadBalances(), loadEncryptedHandles()]);
       setCusdcDecrypted(null);
     } catch (err: unknown) {
       console.error(err);
@@ -504,9 +720,21 @@ export default function Vault() {
       await connect();
       return;
     }
+    // Pre-check if decrypted balance is available and insufficient
+    if (cusdcDecrypted !== null && Number(amount) > Number(cusdcDecrypted)) {
+      setTxTitle("Unwrapping cUSDC -> USDC");
+      setTxSteps([{ label: "Balance check", status: "error" }]);
+      setTxError(`Insufficient cUSDC balance (have ${parseFloat(Number(cusdcDecrypted).toFixed(6))}, need ${amount}).`);
+      setTxModalOpen(true);
+      return;
+    }
     const steps: Step[] = [
+      { label: "Encrypting amount", status: "pending" },
       { label: "Submitting unwrap transaction", status: "pending" },
       { label: "Waiting for confirmation", status: "pending" },
+      { label: "Waiting for decryption result", status: "pending" },
+      { label: "Finalizing unwrap", status: "pending" },
+      { label: "Waiting for finalization confirmation", status: "pending" },
     ];
     setTxTitle("Unwrapping cUSDC -> USDC");
     setTxSteps(steps);
@@ -515,17 +743,43 @@ export default function Vault() {
     setBusy(true);
 
     try {
+      // cUSDC unwrap requires encrypted amount (ERC7984ERC20Wrapper signature)
+      // unwrap(address from, address to, externalEuint64 encryptedAmount, bytes inputProof)
       updateStep(0, "active");
-      const cusdc = await getCUSDC(true);
-      const tx = await cusdc.unwrap(parseUnits(amount, 6));
+      await new Promise(r => setTimeout(r, 50)); // let React paint modal
+      const encrypted = await encryptUint64(CUSDC_ADDRESS, account, parseUnits(amount, 6));
       updateStep(0, "done");
 
       updateStep(1, "active");
-      await tx.wait();
+      const hash = await cusdcWrite("unwrap", [account, account, encrypted.handles[0], encrypted.inputProof]);
       updateStep(1, "done");
 
-      loadBalances();
-      loadEncryptedHandles();
+      updateStep(2, "active");
+      const receipt = await waitTx(hash);
+      updateStep(2, "done");
+
+      updateStep(3, "active");
+      const handle = parseUnwrapRequestedHandle(receipt, "USDC");
+      const pending: PendingUnwrap = {
+        token: "USDC",
+        contractAddress: CUSDC_ADDRESS,
+        handle,
+        txHash: hash,
+        blockNumber: receipt.blockNumber,
+      };
+      const decrypted = await runPublicDecrypt(pending, true);
+      updateStep(3, "done");
+
+      updateStep(4, "active");
+      const hash2 = await cusdcWrite("finalizeUnwrap", [decrypted.handle, decrypted.cleartext!, decrypted.decryptionProof!]);
+      updateStep(4, "done");
+
+      updateStep(5, "active");
+      await waitTx(hash2);
+      updateStep(5, "done");
+
+      setPendingUnwraps((prev) => prev.filter((item) => item.handle.toLowerCase() !== handle.toLowerCase()));
+      await Promise.all([loadBalances(), loadEncryptedHandles(), refreshPendingUnwraps()]);
       setCusdcDecrypted(null);
     } catch (err: unknown) {
       console.error(err);
@@ -536,6 +790,21 @@ export default function Vault() {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    const candidates = pendingUnwraps.filter((item) => item.status === "requested");
+    if (candidates.length === 0) return;
+
+    void (async () => {
+      for (const item of candidates) {
+        try {
+          await runPublicDecrypt(item);
+        } catch {
+          // keep item visible for manual retry after refresh
+        }
+      }
+    })();
+  }, [pendingUnwraps]);
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -593,43 +862,44 @@ export default function Vault() {
         </div>
       )}
 
-      {/* Cards Grid */}
+      {/* Token Selector + Card */}
       {account && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* ETH <-> cWETH */}
-          <VaultCard
-            title="ETH <-> cWETH"
-            symbol="ETH"
+        <div className="max-w-lg mx-auto">
+          {/* Token selector */}
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-xs text-slate-500 uppercase tracking-wider">Token</span>
+            <select
+              value={selectedToken}
+              onChange={(e) => setSelectedToken(e.target.value as "ETH" | "USDC")}
+              className="bg-[#111827] border border-[#1e293b] text-slate-200 text-sm font-medium rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500/50 transition cursor-pointer"
+            >
+              <option value="ETH">ETH ↔ cWETH</option>
+              <option value="USDC">USDC ↔ cUSDC</option>
+            </select>
+          </div>
 
-            contractAddress={CWETH_ADDRESS}
-            plaintextBalance={ethBalance}
+          {/* Active card */}
+          <VaultCard
+            title={selectedToken === "ETH" ? "ETH ↔ cWETH" : "USDC ↔ cUSDC"}
+            symbol={selectedToken}
+            contractAddress={selectedToken === "ETH" ? CWETH_ADDRESS : CUSDC_ADDRESS}
+            plaintextBalance={selectedToken === "ETH" ? ethBalance : usdcBalance}
             plaintextLoading={balancesLoading}
-            encryptedHandle={cwethHandle}
-            decryptedBalance={cwethDecrypted}
-            decryptLoading={cwethDecrypting}
-            onDecrypt={handleDecryptCWETH}
-            onWrap={handleWrapETH}
-            onUnwrap={handleUnwrapETH}
+            encryptedHandle={selectedToken === "ETH" ? cwethHandle : cusdcHandle}
+            decryptedBalance={selectedToken === "ETH" ? cwethDecrypted : cusdcDecrypted}
+            decryptLoading={selectedToken === "ETH" ? cwethDecrypting : cusdcDecrypting}
+            onDecrypt={handleDecryptAll}
+            onWrap={selectedToken === "ETH" ? handleWrapETH : handleWrapUSDC}
+            onUnwrap={selectedToken === "ETH" ? handleUnwrapETH : handleUnwrapUSDC}
             busy={busy}
             account={account}
           />
 
-          {/* USDC <-> cUSDC */}
-          <VaultCard
-            title="USDC <-> cUSDC"
-            symbol="USDC"
-
-            contractAddress={CUSDC_ADDRESS}
-            plaintextBalance={usdcBalance}
-            plaintextLoading={balancesLoading}
-            encryptedHandle={cusdcHandle}
-            decryptedBalance={cusdcDecrypted}
-            decryptLoading={cusdcDecrypting}
-            onDecrypt={handleDecryptCUSDC}
-            onWrap={handleWrapUSDC}
-            onUnwrap={handleUnwrapUSDC}
-            busy={busy}
-            account={account}
+          {/* Pending unwraps for selected token */}
+          <PendingUnwrapList
+            title={selectedToken === "ETH" ? "cWETH" : "cUSDC"}
+            items={pendingUnwraps.filter((item) => item.token === selectedToken)}
+            onFinalize={(item) => { void finalizePendingUnwrap(item); }}
           />
         </div>
       )}
