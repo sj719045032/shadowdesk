@@ -390,7 +390,7 @@ export type PendingFillInfo = {
 export function parseFillInitiatedId(logs: readonly { data: `0x${string}`; topics: readonly `0x${string}`[] }[]): bigint {
   for (const log of logs) {
     try {
-      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { eventName: string; args: Record<string, unknown> };
+      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: [...log.topics] as [`0x${string}`, ...`0x${string}`[]] }) as unknown as { eventName: string; args: Record<string, unknown> };
       if (decoded.eventName === "FillInitiated") {
         return BigInt((decoded.args.pendingFillId ?? decoded.args[0] ?? 0) as string | number | bigint);
       }
@@ -402,7 +402,7 @@ export function parseFillInitiatedId(logs: readonly { data: `0x${string}`; topic
 export function parseFillCancelledReason(logs: readonly { data: `0x${string}`; topics: readonly `0x${string}`[] }[]): string | null {
   for (const log of logs) {
     try {
-      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: log.topics }) as unknown as { eventName: string; args: Record<string, unknown> };
+      const decoded = decodeEventLog({ abi: OTC_ABI, data: log.data, topics: [...log.topics] as [`0x${string}`, ...`0x${string}`[]] }) as unknown as { eventName: string; args: Record<string, unknown> };
       if (decoded.eventName === "FillCancelled") {
         const r = (decoded.args.reason as string) || "Fill cancelled";
         if (r === "Price mismatch") return "Fill cancelled: your bid price did not meet the maker's asking price.";
