@@ -109,6 +109,33 @@ function VaultCard({
           </span>
         </div>
 
+        {/* Faucet hint when balance is zero */}
+        {!plaintextLoading && plaintextBalance !== "" && Number(plaintextBalance) <= 0 && (
+          <a
+            href={symbol === "ETH"
+              ? "https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
+              : "https://faucet.circle.com/"}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-[11px] text-cyan-400/80 hover:text-cyan-300 transition-colors group"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+              <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" />
+            </svg>
+            <span>
+              Need test {symbol}? Get from{" "}
+              <span className="underline underline-offset-2 group-hover:text-cyan-200">
+                {symbol === "ETH" ? "Sepolia Faucet" : "Circle Faucet"}
+              </span>
+            </span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 opacity-50 group-hover:opacity-100">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+          </a>
+        )}
+
         {/* Encrypted balance */}
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
